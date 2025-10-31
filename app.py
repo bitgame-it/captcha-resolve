@@ -42,7 +42,7 @@ def load_model():
 
         logger.info("Loading ONNX model...")
         # Usa la stessa configurazione del tuo bot
-        session = ort.InferenceSession(model_path)
+        session = ort.InferenceSession(model_path, providers=["CPUExecutionProvider"])
         
         logger.info("Loading model metadata...")
         with open(metadata_path, 'r') as f:
