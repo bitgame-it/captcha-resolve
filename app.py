@@ -40,16 +40,12 @@ def load_model():
         
         logger.info("🔄 Loading ONNX model...")
         
-        # CON ONNXRUNTIME 1.18.1, usa la stessa logica del tuo bot
-        # Il tuo bot usa semplicemente: ort.InferenceSession(model_path)
-        # Quindi proviamo prima senza provider espliciti
         try:
             session = ort.InferenceSession(model_path)
             logger.info("✅ ONNX model loaded successfully (no explicit providers)")
         except Exception as e:
             logger.warning(f"First attempt failed: {e}")
             logger.info("🔄 Trying with explicit CPU provider...")
-            # Se fallisce, prova con provider esplicito
             session = ort.InferenceSession(model_path, providers=['CPUExecutionProvider'])
             logger.info("✅ ONNX model loaded successfully (with CPU provider)")
         
@@ -62,7 +58,15 @@ def load_model():
         # Test del modello
         logger.info("🔄 Testing model inference...")
         if 'input_shape' in metadata:
-            height, width = metadata['input_shape'][1:3]
+            input_shape = metadata['input_shape']
+            logger.info(f"📐 Testing with input_shape: {input_shape}")
+            
+            # Determina dimensioni per il test
+            if len(input_shape) >= 3:
+                height = input_shape[-2] if len(input_shape) >= 2 else 64
+                width = input_shape[-1] if len(input_shape) >= 2 else 128
+            else:
+                height, width = 64, 128
         else:
             height, width = 64, 128
             
@@ -81,24 +85,50 @@ def load_model():
 logger.info("🚀 Starting application...")
 model_session, model_metadata = load_model()
 
-# Definisci variabili globali
+# Definisci variabili globali CON CONTROLLO DELLE DIMENSIONI
 if model_session and model_metadata:
     logger.info("🎉 Application started successfully with model loaded!")
     
     char_set = model_metadata.get('chars', 'abcdefghijklmnopqrstuvwxyz0123456789')
     idx_to_char = model_metadata.get('idx_to_char', {})
     
+    # CONTROLLO SICURO delle dimensioni dell'input
     if 'input_shape' in model_metadata:
         input_shape = model_metadata['input_shape']
-        expected_channels = input_shape[1]
-        expected_height = input_shape[2]
-        expected_width = input_shape[3]
+        logger.info(f"📐 Raw input_shape: {input_shape}")
+        logger.info(f"📐 Input shape length: {len(input_shape)}")
+        
+        # Estrai dimensioni in modo sicuro
+        if len(input_shape) == 4:
+            # Formato: [batch, channels, height, width]
+            expected_channels = input_shape[1]
+            expected_height = input_shape[2]
+            expected_width = input_shape[3]
+        elif len(input_shape) == 3:
+            # Formato: [channels, height, width] 
+            expected_channels = input_shape[0]
+            expected_height = input_shape[1]
+            expected_width = input_shape[2]
+        elif len(input_shape) == 2:
+            # Formato: [height, width]
+            expected_channels = 1  # Assume grayscale
+            expected_height = input_shape[0]
+            expected_width = input_shape[1]
+        else:
+            # Formato sconosciuto, usa default
+            logger.warning(f"Unknown input_shape format: {input_shape}")
+            expected_channels = 1
+            expected_height = 64
+            expected_width = 128
     else:
+        # Se non c'è input_shape nel metadata, usa valori di default
+        logger.warning("No input_shape in metadata, using defaults")
         expected_channels = 1
         expected_height = 64
         expected_width = 128
     
     logger.info(f"📐 Model configuration: {expected_channels} channel(s), {expected_height}x{expected_width}")
+    
 else:
     logger.error("💥 Application started WITHOUT model!")
     char_set = 'abcdefghijklmnopqrstuvwxyz0123456789'
