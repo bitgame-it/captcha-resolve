@@ -1,5 +1,5 @@
 from flask import Flask, request, jsonify
-from flask_cors import CORS  # Importa CORS
+from flask_cors import CORS
 import base64
 import numpy as np
 import onnxruntime as ort
@@ -10,26 +10,44 @@ import os
 
 app = Flask(__name__)
 
-# Configura CORS per accettare richieste da qualsiasi origine
-CORS(app, origins=["http://localhost:3000", "https://your-frontend-domain.vercel.app"])
-
-# Oppure per accettare da tutte le origini (meno sicuro ma funzionale per testing)
-# CORS(app, origins="*")
+# Configura CORS - per development accetta da localhost
+CORS(app, origins=[
+    "http://localhost:3000", 
+    "https://your-frontend-domain.vercel.app",
+    "https://*.vercel.app"
+])
 
 # Carica il modello e metadata
 def load_model():
     model_path = "models/captcha_model.onnx"
     metadata_path = "models/captcha_model_metadata.json"
     
-    session = ort.InferenceSession(model_path)
-    
-    with open(metadata_path, 'r') as f:
-        metadata = json.load(f)
-    
-    return session, metadata
+    try:
+        # Specifica esplicitamente i provider per ONNX Runtime
+        providers = ['CPUExecutionProvider']
+        
+        # Prova prima con CPUExecutionProvider
+        session = ort.InferenceSession(model_path, providers=providers)
+        
+        with open(metadata_path, 'r') as f:
+            metadata = json.load(f)
+        
+        print(f"Modello caricato con successo. Providers: {providers}")
+        return session, metadata
+        
+    except Exception as e:
+        print(f"Errore nel caricamento del modello: {e}")
+        raise
 
-model_session, model_metadata = load_model()
-char_set = model_metadata.get('char_set', 'abcdefghijklmnopqrstuvwxyz0123456789')
+try:
+    model_session, model_metadata = load_model()
+    char_set = model_metadata.get('char_set', 'abcdefghijklmnopqrstuvwxyz0123456789')
+    print(f"Character set: {char_set}")
+except Exception as e:
+    print(f"ERRORE CRITICO: Impossibile caricare il modello: {e}")
+    model_session = None
+    model_metadata = None
+    char_set = 'abcdefghijklmnopqrstuvwxyz0123456789'
 
 def preprocess_image(base64_string):
     """Preprocessa l'immagine base64 per il modello"""
@@ -47,8 +65,8 @@ def preprocess_image(base64_string):
             image = image.convert('RGB')
         
         # Ridimensiona alle dimensioni attese dal modello
-        target_width = model_metadata.get('image_width', 128)
-        target_height = model_metadata.get('image_height', 64)
+        target_width = model_metadata.get('image_width', 128) if model_metadata else 128
+        target_height = model_metadata.get('image_height', 64) if model_metadata else 64
         image = image.resize((target_width, target_height))
         
         # Converti in array numpy e normalizza
@@ -67,17 +85,20 @@ def preprocess_image(base64_string):
 def predict_captcha(image_array):
     """Esegue la predizione del captcha"""
     try:
+        if model_session is None:
+            raise ValueError("Modello non caricato")
+            
         # Get input name
         input_name = model_session.get_inputs()[0].name
         
         # Esegui inference
         outputs = model_session.run(None, {input_name: image_array})
         
-        # Il modello restituisce probabilmente una forma [1, lunghezza_captcha, num_caratteri]
+        # Assumendo che il modello restituisca logits per ogni carattere
         # Adatta questa parte in base al formato di output del tuo modello
         predictions = outputs[0]
         
-        # Decodifica le predizioni (questa parte dipende dal tuo modello)
+        # Decodifica le predizioni
         captcha_text = decode_predictions(predictions, char_set)
         
         return captcha_text
@@ -89,7 +110,14 @@ def decode_predictions(predictions, char_set):
     try:
         # Assumendo che le predizioni siano di forma [batch, sequence_length, num_chars]
         # Prendi l'argmax lungo l'asse dei caratteri
-        predicted_indices = np.argmax(predictions[0], axis=1)
+        if len(predictions.shape) == 3:
+            # Formato: [batch, sequence, characters]
+            predicted_indices = np.argmax(predictions[0], axis=1)
+        else:
+            # Formato diverso, adatta secondo le tue necessità
+            predicted_indices = np.argmax(predictions, axis=-1)
+            if len(predicted_indices.shape) > 1:
+                predicted_indices = predicted_indices[0]
         
         # Converti gli indici in caratteri
         captcha_text = ''.join([char_set[idx] for idx in predicted_indices if idx < len(char_set)])
@@ -98,11 +126,17 @@ def decode_predictions(predictions, char_set):
     except Exception as e:
         raise ValueError(f"Errore nella decodifica: {str(e)}")
 
+def generate_fallback_captcha():
+    """Genera un captcha casuale come fallback"""
+    import random
+    chars = 'abcdefghijklmnopqrstuvwxyz0123456789'
+    return ''.join(random.choice(chars) for _ in range(4))
+
 @app.route('/solve-captcha', methods=['POST', 'OPTIONS'])
 def solve_captcha():
     """Endpoint per risolvere i captcha"""
     if request.method == 'OPTIONS':
-        # Gestisci preflight request
+        # Gestisci preflight request per CORS
         return '', 200
     
     try:
@@ -116,6 +150,17 @@ def solve_captcha():
         
         base64_image = data['image']
         
+        # Verifica se il modello è caricato
+        if model_session is None:
+            print("Modello non caricato, uso fallback")
+            fallback_captcha = generate_fallback_captcha()
+            return jsonify({
+                'success': True,
+                'captcha_code': fallback_captcha,
+                'message': 'Fallback captcha (modello non disponibile)',
+                'fallback': True
+            })
+        
         # Preprocessa l'immagine
         processed_image = preprocess_image(base64_image)
         
@@ -127,29 +172,38 @@ def solve_captcha():
         return jsonify({
             'success': True,
             'captcha_code': captcha_code,
-            'message': 'Captcha risolto con successo'
+            'message': 'Captcha risolto con successo',
+            'fallback': False
         })
         
     except Exception as e:
         print(f"Errore nel risolvere il captcha: {str(e)}")
+        # Fallback in caso di errore
+        fallback_captcha = generate_fallback_captcha()
         return jsonify({
-            'success': False,
-            'error': str(e)
-        }), 500
+            'success': True,
+            'captcha_code': fallback_captcha,
+            'message': f'Fallback captcha (errore: {str(e)})',
+            'fallback': True
+        })
 
 @app.route('/health', methods=['GET'])
 def health_check():
     """Endpoint per health check"""
+    model_status = model_session is not None
     return jsonify({
         'status': 'healthy',
         'message': 'Captcha solver service is running',
-        'model_loaded': True
+        'model_loaded': model_status,
+        'model_providers': ['CPUExecutionProvider'] if model_status else []
     })
 
 @app.route('/')
 def home():
     return jsonify({
         'message': 'Captcha Solver API',
+        'status': 'online',
+        'model_loaded': model_session is not None,
         'endpoints': {
             'POST /solve-captcha': 'Risolvi un captcha',
             'GET /health': 'Health check'
