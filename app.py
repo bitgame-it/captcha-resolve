@@ -11,7 +11,7 @@ import logging
 
 app = Flask(__name__)
 
-# Configura CORS
+# Configura CORS per accettare richieste dal frontend
 CORS(app, origins=[
     "http://localhost:3000", 
     "https://your-frontend-domain.vercel.app",
@@ -22,59 +22,70 @@ CORS(app, origins=[
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# Carica il modello e metadata
+# Carica il modello e metadata - USA LA STESSA LOGICA DEL TUO BOT
 def load_model():
-    model_path = "models/captcha_model.onnx"
-    metadata_path = "models/captcha_model_metadata.json"
-    
     try:
-        # Specifica esplicitamente i provider
-        providers = ['CPUExecutionProvider']
+        # Cerca i file del modello nella directory models
+        model_path = "models/captcha_model.onnx"
+        metadata_path = "models/captcha_model_metadata.json"
         
-        session = ort.InferenceSession(model_path, providers=providers)
+        logger.info(f"Looking for ONNX model at: {model_path}")
+        logger.info(f"Looking for metadata at: {metadata_path}")
         
+        if not os.path.exists(model_path):
+            logger.error(f"ONNX model file not found at {model_path}")
+            return None, None
+            
+        if not os.path.exists(metadata_path):
+            logger.error(f"Model metadata file not found at {metadata_path}")
+            return None, None
+
+        logger.info("Loading ONNX model...")
+        # Usa la stessa configurazione del tuo bot
+        session = ort.InferenceSession(model_path)
+        
+        logger.info("Loading model metadata...")
         with open(metadata_path, 'r') as f:
             metadata = json.load(f)
         
-        logger.info(f"Modello caricato con successo. Input shape: {metadata.get('input_shape', 'N/A')}")
+        logger.info("Model loaded successfully")
         return session, metadata
         
     except Exception as e:
-        logger.error(f"Errore nel caricamento del modello: {e}")
-        raise
+        logger.error(f"Error loading model: {e}")
+        return None, None
 
-try:
-    model_session, model_metadata = load_model()
+# Carica il modello all'avvio
+model_session, model_metadata = load_model()
+
+if model_session and model_metadata:
+    logger.info("✅ Model initialized successfully")
+    # Estrai le informazioni dal metadata come nel tuo bot
+    char_set = model_metadata.get('chars', 'abcdefghijklmnopqrstuvwxyz0123456789')
+    idx_to_char = model_metadata.get('idx_to_char', {})
     
-    # Estrai le dimensioni corrette dal metadata
+    # Dimensioni del modello dal metadata
     if 'input_shape' in model_metadata:
-        # Formato: [batch, channels, height, width]
         input_shape = model_metadata['input_shape']
         expected_channels = input_shape[1]
-        expected_height = input_shape[2]
+        expected_height = input_shape[2] 
         expected_width = input_shape[3]
     else:
-        # Valori di default basati sull'errore
+        # Valori di default
         expected_channels = 1
-        expected_height = 40
-        expected_width = 150
+        expected_height = 64
+        expected_width = 128
     
-    char_set = model_metadata.get('char_set', 'abcdefghijklmnopqrstuvwxyz0123456789')
     logger.info(f"Model expects: {expected_channels} channels, {expected_height}x{expected_width}")
-    
-except Exception as e:
-    logger.error(f"ERRORE CRITICO: Impossibile caricare il modello: {e}")
+else:
+    logger.error("❌ Model initialization failed")
     model_session = None
     model_metadata = None
-    expected_channels = 1
-    expected_height = 40
-    expected_width = 150
-    char_set = 'abcdefghijklmnopqrstuvwxyz0123456789'
 
 def preprocess_image(base64_string):
-    """Preprocessa l'immagine base64 per il modello con le dimensioni corrette"""
+    """Preprocessa l'immagine base64 - USA LA STESSA LOGICA DEL TUO BOT"""
     try:
-        # Rimuovi l'header se presente
+        # Rimuovi l'header se presente (data:image/jpeg;base64,...)
         if ',' in base64_string:
             base64_string = base64_string.split(',')[1]
         
@@ -82,61 +93,44 @@ def preprocess_image(base64_string):
         image_data = base64.b64decode(base64_string)
         image = Image.open(io.BytesIO(image_data))
         
-        logger.info(f"Immagine originale: {image.mode}, {image.size}")
+        logger.info(f"Original image: {image.mode}, {image.size}")
         
-        # Converti nel formato colore corretto
-        if expected_channels == 1:
-            # Il modello si aspetta grayscale
-            if image.mode != 'L':
-                image = image.convert('L')
-        else:
-            # Il modello si aspetta RGB
-            if image.mode != 'RGB':
-                image = image.convert('RGB')
+        # Converti in grayscale come nel tuo bot
+        if image.mode != 'L':
+            image = image.convert('L')
         
         # Ridimensiona alle dimensioni attese dal modello
         image = image.resize((expected_width, expected_height), Image.LANCZOS)
-        logger.info(f"Immagine ridimensionata: {image.mode}, {image.size}")
+        logger.info(f"Resized image: {image.mode}, {image.size}")
         
         # Converti in array numpy
-        image_array = np.array(image).astype(np.float32) / 255.0
+        image_array = np.array(image, dtype=np.float32)
         
-        # Gestisci i canali in base alle aspettative del modello
-        if expected_channels == 1:
-            # Se il modello si aspetta 1 canale ma l'immagine è RGB, converti
-            if len(image_array.shape) == 3 and image_array.shape[2] == 3:
-                image_array = np.mean(image_array, axis=2)  # Converti RGB in grayscale
-            # Assicurati che sia 2D
-            if len(image_array.shape) == 2:
-                image_array = np.expand_dims(image_array, axis=0)  # Aggiungi dimensione canale
+        # Normalizza usando i valori del metadata (come nel tuo bot)
+        if model_metadata and 'normalization' in model_metadata:
+            mean = model_metadata['normalization']['mean'][0]
+            std = model_metadata['normalization']['std'][0]
+            image_array = (image_array / 255.0 - mean) / std
         else:
-            # Se il modello si aspetta 3 canali ma l'immagine è grayscale, converti
-            if len(image_array.shape) == 2:
-                image_array = np.stack([image_array] * 3, axis=0)  # Converti in RGB
+            # Normalizzazione di default
+            image_array = image_array / 255.0
         
-        # Formato finale: [channels, height, width]
-        logger.info(f"Shape dopo elaborazione: {image_array.shape}")
+        # Formato finale: [1, 1, height, width] - come nel tuo bot
+        image_array = np.expand_dims(image_array, axis=0)  # batch dimension
+        image_array = np.expand_dims(image_array, axis=0)  # channel dimension
         
-        # Aggiungi dimensione batch: [batch, channels, height, width]
-        image_array = np.expand_dims(image_array, axis=0)
-        logger.info(f"Shape finale per il modello: {image_array.shape}")
-        
+        logger.info(f"Final shape for model: {image_array.shape}")
         return image_array
         
     except Exception as e:
-        logger.error(f"Errore nel preprocessing: {str(e)}")
+        logger.error(f"Error preprocessing image: {str(e)}")
         raise
 
 def predict_captcha(image_array):
-    """Esegue la predizione del captcha"""
+    """Esegue la predizione del captcha - USA LA STESSA LOGICA DEL TUO BOT"""
     try:
         if model_session is None:
-            raise ValueError("Modello non caricato")
-            
-        # Verifica che le dimensioni siano corrette
-        expected_shape = (1, expected_channels, expected_height, expected_width)
-        if image_array.shape != expected_shape:
-            raise ValueError(f"Dimensioni errate: atteso {expected_shape}, ottenuto {image_array.shape}")
+            raise ValueError("Model not loaded")
         
         # Get input name
         input_name = model_session.get_inputs()[0].name
@@ -144,76 +138,43 @@ def predict_captcha(image_array):
         # Esegui inference
         outputs = model_session.run(None, {input_name: image_array})
         
-        # Decodifica le predizioni
-        captcha_text = decode_predictions(outputs, char_set)
-        
-        return captcha_text
-    except Exception as e:
-        raise ValueError(f"Errore nella predizione: {str(e)}")
+        # Decodifica le predizioni - STESSA LOGICA DEL TUO BOT
+        predicted_text = ""
+        confidences = []
 
-def decode_predictions(outputs, char_set):
-    """Decodifica le predizioni in testo"""
-    try:
-        # Il modello probabilmente restituisce 4 output (uno per ogni carattere)
-        # o un singolo output con shape [batch, sequence_length, num_chars]
-        
-        if len(outputs) == 4:
-            # Caso: 4 output separati per ogni carattere
-            predicted_text = ""
-            for i in range(4):
-                if i < len(outputs):
-                    char_probs = outputs[i][0]  # [num_chars]
-                    predicted_idx = np.argmax(char_probs)
-                    if predicted_idx < len(char_set):
-                        predicted_text += char_set[predicted_idx]
-                    else:
-                        predicted_text += '?'
-                else:
-                    predicted_text += '?'
-            return predicted_text
-            
-        elif len(outputs) == 1:
-            # Caso: singolo output con multiple dimensioni
-            predictions = outputs[0]  # Shape: [batch, sequence, num_chars] o [batch, num_chars, sequence]
-            
-            if len(predictions.shape) == 3:
-                # [batch, sequence, num_chars]
-                predicted_indices = np.argmax(predictions[0], axis=1)
-            else:
-                # [batch, num_chars, sequence] - trasponi se necessario
-                if predictions.shape[1] == len(char_set):
-                    predicted_indices = np.argmax(predictions[0], axis=0)
-                else:
-                    predicted_indices = np.argmax(predictions[0], axis=1)
-            
-            predicted_text = ''.join([char_set[idx] for idx in predicted_indices if idx < len(char_set)])
-            return predicted_text
-            
-        else:
-            # Cerca di interpretare l'output in modo generico
-            logger.warning(f"Numero inaspettato di output: {len(outputs)}")
-            # Prova con il primo output
-            predictions = outputs[0]
-            if len(predictions.shape) >= 2:
-                predicted_indices = np.argmax(predictions[0], axis=-1)
-                predicted_text = ''.join([char_set[idx] for idx in predicted_indices if idx < len(char_set)])
-                return predicted_text
-            else:
-                return "????"
+        # Il tuo modello probabilmente restituisce 4 output per 4 caratteri
+        for pos in range(4):
+            if pos < len(outputs):
+                char_probs = outputs[pos][0]  # [num_chars]
+                predicted_idx = np.argmax(char_probs)
+                confidence = float(char_probs[predicted_idx])
                 
+                # Converti indice in carattere
+                predicted_char = idx_to_char.get(str(predicted_idx), '?')
+                predicted_text += predicted_char
+                confidences.append(confidence)
+            else:
+                predicted_text += '?'
+                confidences.append(0.0)
+
+        avg_confidence = sum(confidences) / len(confidences) if confidences else 0.0
+        
+        logger.info(f"Predicted captcha: {predicted_text} (confidence: {avg_confidence:.3f})")
+        return predicted_text, avg_confidence
+        
     except Exception as e:
-        logger.error(f"Errore nella decodifica: {str(e)}")
-        return "????"
+        logger.error(f"Error in prediction: {str(e)}")
+        raise
 
 def generate_fallback_captcha():
     """Genera un captcha casuale come fallback"""
     import random
     chars = 'abcdefghijklmnopqrstuvwxyz0123456789'
-    return ''.join(random.choice(chars) for _ in range(4))
+    return ''.join(random.choice(chars) for _ in range(4)), 0.0
 
 @app.route('/solve-captcha', methods=['POST', 'OPTIONS'])
 def solve_captcha():
-    """Endpoint per risolvere i captcha"""
+    """Endpoint principale per risolvere i captcha"""
     if request.method == 'OPTIONS':
         return '', 200
     
@@ -223,19 +184,20 @@ def solve_captcha():
         if not data or 'image' not in data:
             return jsonify({
                 'success': False,
-                'error': 'Nessuna immagine fornita'
+                'error': 'No image provided'
             }), 400
         
         base64_image = data['image']
         
         # Verifica se il modello è caricato
         if model_session is None:
-            logger.warning("Modello non caricato, uso fallback")
-            fallback_captcha = generate_fallback_captcha()
+            logger.warning("Model not loaded, using fallback")
+            captcha_code, confidence = generate_fallback_captcha()
             return jsonify({
                 'success': True,
-                'captcha_code': fallback_captcha,
-                'message': 'Fallback captcha (modello non disponibile)',
+                'captcha_code': captcha_code,
+                'confidence': confidence,
+                'message': 'Fallback captcha (model not available)',
                 'fallback': True
             })
         
@@ -243,25 +205,44 @@ def solve_captcha():
         processed_image = preprocess_image(base64_image)
         
         # Predici il captcha
-        captcha_code = predict_captcha(processed_image)
+        captcha_code, confidence = predict_captcha(processed_image)
         
-        logger.info(f"Captcha risolto: {captcha_code}")
+        # Valida il risultato (come nel tuo bot)
+        valid_chars = set(model_metadata.get('chars', 'abcdefghijklmnopqrstuvwxyz0123456789'))
+        is_valid = (captcha_code and 
+                   len(captcha_code) == 4 and 
+                   all(c in valid_chars for c in captcha_code))
         
+        if is_valid:
+            logger.info(f"✅ Captcha solved successfully: {captcha_code}")
+            return jsonify({
+                'success': True,
+                'captcha_code': captcha_code,
+                'confidence': confidence,
+                'message': 'Captcha solved successfully',
+                'fallback': False
+            })
+        else:
+            logger.warning(f"❌ Invalid captcha result: {captcha_code}")
+            # Usa fallback se il risultato non è valido
+            captcha_code, confidence = generate_fallback_captcha()
+            return jsonify({
+                'success': True,
+                'captcha_code': captcha_code,
+                'confidence': confidence,
+                'message': f'Fallback captcha (invalid result: {captcha_code})',
+                'fallback': True
+            })
+        
+    except Exception as e:
+        logger.error(f"Error solving captcha: {str(e)}")
+        # Fallback in caso di errore
+        captcha_code, confidence = generate_fallback_captcha()
         return jsonify({
             'success': True,
             'captcha_code': captcha_code,
-            'message': 'Captcha risolto con successo',
-            'fallback': False
-        })
-        
-    except Exception as e:
-        logger.error(f"Errore nel risolvere il captcha: {str(e)}")
-        # Fallback in caso di errore
-        fallback_captcha = generate_fallback_captcha()
-        return jsonify({
-            'success': True,
-            'captcha_code': fallback_captcha,
-            'message': f'Fallback captcha (errore: {str(e)})',
+            'confidence': confidence,
+            'message': f'Fallback captcha (error: {str(e)})',
             'fallback': True
         })
 
@@ -269,23 +250,29 @@ def solve_captcha():
 def health_check():
     """Endpoint per health check"""
     model_status = model_session is not None
-    return jsonify({
+    health_info = {
         'status': 'healthy',
         'message': 'Captcha solver service is running',
         'model_loaded': model_status,
-        'model_details': {
-            'channels': expected_channels,
-            'height': expected_height,
-            'width': expected_width,
-            'char_set_length': len(char_set)
-        } if model_status else None
-    })
+    }
+    
+    if model_status and model_metadata:
+        health_info.update({
+            'model_details': {
+                'channels': expected_channels,
+                'height': expected_height,
+                'width': expected_width,
+                'char_set_length': len(char_set)
+            }
+        })
+    
+    return jsonify(health_info)
 
 @app.route('/model-info', methods=['GET'])
 def model_info():
     """Endpoint per informazioni dettagliate sul modello"""
     if model_session is None:
-        return jsonify({'error': 'Modello non caricato'}), 500
+        return jsonify({'error': 'Model not loaded'}), 500
     
     inputs_info = []
     for input in model_session.get_inputs():
@@ -315,10 +302,10 @@ def home():
         'message': 'Captcha Solver API',
         'status': 'online',
         'model_loaded': model_session is not None,
-        'expected_dimensions': {
-            'channels': expected_channels,
-            'height': expected_height,
-            'width': expected_width
+        'endpoints': {
+            'POST /solve-captcha': 'Solve a captcha from base64 image',
+            'GET /health': 'Health check',
+            'GET /model-info': 'Model information'
         }
     })
 
