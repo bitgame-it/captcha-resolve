@@ -11,81 +11,106 @@ import logging
 
 app = Flask(__name__)
 
-# Configura CORS per accettare richieste dal frontend
-CORS(app, origins=[
-    "http://localhost:3000", 
-    "https://your-frontend-domain.vercel.app",
-    "https://*.vercel.app"
-])
+# Configura CORS
+CORS(app, origins=["*"])
 
 # Configura logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# Carica il modello e metadata - USA LA STESSA LOGICA DEL TUO BOT
 def load_model():
+    """Carica il modello ONNX con la stessa configurazione del tuo bot"""
     try:
-        # Cerca i file del modello nella directory models
+        logger.info("🔍 Starting model loading process...")
+        
         model_path = "models/captcha_model.onnx"
         metadata_path = "models/captcha_model_metadata.json"
         
-        logger.info(f"Looking for ONNX model at: {model_path}")
-        logger.info(f"Looking for metadata at: {metadata_path}")
-        
         if not os.path.exists(model_path):
-            logger.error(f"ONNX model file not found at {model_path}")
+            logger.error(f"❌ Model file not found: {model_path}")
+            logger.error(f"Current directory: {os.getcwd()}")
+            logger.error(f"Directory contents: {os.listdir('.')}")
+            if os.path.exists('models'):
+                logger.error(f"Models directory: {os.listdir('models')}")
             return None, None
             
         if not os.path.exists(metadata_path):
-            logger.error(f"Model metadata file not found at {metadata_path}")
+            logger.error(f"❌ Metadata file not found: {metadata_path}")
             return None, None
-
-        logger.info("Loading ONNX model...")
-        # Usa la stessa configurazione del tuo bot
-        session = ort.InferenceSession(model_path, providers=["CPUExecutionProvider"])
         
-        logger.info("Loading model metadata...")
+        logger.info("🔄 Loading ONNX model...")
+        
+        # CON ONNXRUNTIME 1.18.1, usa la stessa logica del tuo bot
+        # Il tuo bot usa semplicemente: ort.InferenceSession(model_path)
+        # Quindi proviamo prima senza provider espliciti
+        try:
+            session = ort.InferenceSession(model_path)
+            logger.info("✅ ONNX model loaded successfully (no explicit providers)")
+        except Exception as e:
+            logger.warning(f"First attempt failed: {e}")
+            logger.info("🔄 Trying with explicit CPU provider...")
+            # Se fallisce, prova con provider esplicito
+            session = ort.InferenceSession(model_path, providers=['CPUExecutionProvider'])
+            logger.info("✅ ONNX model loaded successfully (with CPU provider)")
+        
+        logger.info("🔄 Loading model metadata...")
         with open(metadata_path, 'r') as f:
             metadata = json.load(f)
         
-        logger.info("Model loaded successfully")
+        logger.info("✅ Model metadata loaded successfully")
+        
+        # Test del modello
+        logger.info("🔄 Testing model inference...")
+        if 'input_shape' in metadata:
+            height, width = metadata['input_shape'][1:3]
+        else:
+            height, width = 64, 128
+            
+        dummy_input = np.random.rand(1, 1, height, width).astype(np.float32)
+        input_name = session.get_inputs()[0].name
+        outputs = session.run(None, {input_name: dummy_input})
+        logger.info(f"✅ Model test successful. Outputs: {len(outputs)}")
+        
         return session, metadata
         
     except Exception as e:
-        logger.error(f"Error loading model: {e}")
+        logger.error(f"❌ Error loading model: {e}")
         return None, None
 
-# Carica il modello all'avvio
+# Carica il modello
+logger.info("🚀 Starting application...")
 model_session, model_metadata = load_model()
 
+# Definisci variabili globali
 if model_session and model_metadata:
-    logger.info("✅ Model initialized successfully")
-    # Estrai le informazioni dal metadata come nel tuo bot
+    logger.info("🎉 Application started successfully with model loaded!")
+    
     char_set = model_metadata.get('chars', 'abcdefghijklmnopqrstuvwxyz0123456789')
     idx_to_char = model_metadata.get('idx_to_char', {})
     
-    # Dimensioni del modello dal metadata
     if 'input_shape' in model_metadata:
         input_shape = model_metadata['input_shape']
         expected_channels = input_shape[1]
-        expected_height = input_shape[2] 
+        expected_height = input_shape[2]
         expected_width = input_shape[3]
     else:
-        # Valori di default
         expected_channels = 1
         expected_height = 64
         expected_width = 128
     
-    logger.info(f"Model expects: {expected_channels} channels, {expected_height}x{expected_width}")
+    logger.info(f"📐 Model configuration: {expected_channels} channel(s), {expected_height}x{expected_width}")
 else:
-    logger.error("❌ Model initialization failed")
-    model_session = None
-    model_metadata = None
+    logger.error("💥 Application started WITHOUT model!")
+    char_set = 'abcdefghijklmnopqrstuvwxyz0123456789'
+    idx_to_char = {}
+    expected_channels = 1
+    expected_height = 64
+    expected_width = 128
 
 def preprocess_image(base64_string):
-    """Preprocessa l'immagine base64 - USA LA STESSA LOGICA DEL TUO BOT"""
+    """Preprocessa l'immagine base64 - STESSA LOGICA DEL TUO BOT"""
     try:
-        # Rimuovi l'header se presente (data:image/jpeg;base64,...)
+        # Rimuovi l'header se presente
         if ',' in base64_string:
             base64_string = base64_string.split(',')[1]
         
@@ -127,7 +152,7 @@ def preprocess_image(base64_string):
         raise
 
 def predict_captcha(image_array):
-    """Esegue la predizione del captcha - USA LA STESSA LOGICA DEL TUO BOT"""
+    """Esegue la predizione del captcha - STESSA LOGICA DEL TUO BOT"""
     try:
         if model_session is None:
             raise ValueError("Model not loaded")
@@ -250,50 +275,11 @@ def solve_captcha():
 def health_check():
     """Endpoint per health check"""
     model_status = model_session is not None
-    health_info = {
+    return jsonify({
         'status': 'healthy',
         'message': 'Captcha solver service is running',
         'model_loaded': model_status,
-    }
-    
-    if model_status and model_metadata:
-        health_info.update({
-            'model_details': {
-                'channels': expected_channels,
-                'height': expected_height,
-                'width': expected_width,
-                'char_set_length': len(char_set)
-            }
-        })
-    
-    return jsonify(health_info)
-
-@app.route('/model-info', methods=['GET'])
-def model_info():
-    """Endpoint per informazioni dettagliate sul modello"""
-    if model_session is None:
-        return jsonify({'error': 'Model not loaded'}), 500
-    
-    inputs_info = []
-    for input in model_session.get_inputs():
-        inputs_info.append({
-            'name': input.name,
-            'shape': input.shape,
-            'type': input.type
-        })
-    
-    outputs_info = []
-    for output in model_session.get_outputs():
-        outputs_info.append({
-            'name': output.name,
-            'shape': output.shape,
-            'type': output.type
-        })
-    
-    return jsonify({
-        'inputs': inputs_info,
-        'outputs': outputs_info,
-        'metadata': model_metadata
+        'model_ready': model_status and model_metadata is not None
     })
 
 @app.route('/')
@@ -302,11 +288,7 @@ def home():
         'message': 'Captcha Solver API',
         'status': 'online',
         'model_loaded': model_session is not None,
-        'endpoints': {
-            'POST /solve-captcha': 'Solve a captcha from base64 image',
-            'GET /health': 'Health check',
-            'GET /model-info': 'Model information'
-        }
+        'model_ready': model_session is not None and model_metadata is not None
     })
 
 if __name__ == '__main__':
