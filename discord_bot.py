@@ -431,7 +431,7 @@ def main():
     DISCORD_CHANNEL_ID = int(os.getenv("DISCORD_GIFTCODE_CHANNEL_ID"))
     SUPABASE_URL = os.getenv("SUPABASE_URL")
     SUPABASE_KEY = os.getenv("SUPABASE_KEY")
-    API_BASE_URL = os.getenv("API_BASE_URL", "http://localhost:8080")
+    API_BASE_URL = os.getenv("API_BASE_URL", "http://localhost:5000")
     
     # Verifica configurazione
     if not all([DISCORD_TOKEN, DISCORD_CHANNEL_ID, SUPABASE_URL, SUPABASE_KEY]):
