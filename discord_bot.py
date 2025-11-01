@@ -72,51 +72,47 @@ class DiscordGiftCodeMonitor:
         sign = hashlib.md5((encoded_data + secret).encode()).hexdigest()
         return {**data, "sign": sign}
     
-    def verify_gift_code(self, gift_code):
-        """Verifica se un codice regalo è valido"""
+    def get_active_codes_from_database(self):
+        """Recupera tutti i codici attivi (non scaduti) dal database"""
         try:
-            timestamp = str(int(datetime.now().timestamp()))
-            test_data = {
-                "fid": "398483320",  # ID di test
-                "cdk": gift_code,
-                "time": timestamp
-            }
+            # Prendi tutti i codici
+            result = self.supabase.table("gift_codes")\
+                .select("*")\
+                .execute()
             
-            encoded_data = self.encode_wos_data(test_data)
+            active_codes = []
+            now = datetime.now().replace(tzinfo=None)
             
-            headers = {
-                "accept": "application/json, text/plain, */*",
-                "content-type": "application/x-www-form-urlencoded",
-                "origin": "https://wos-giftcode.centurygame.com",
-            }
+            for code in result.data:
+                expiry_date_str = code.get('expiry_date')
+                if expiry_date_str:
+                    try:
+                        # Converti la stringa in datetime
+                        expiry_date = datetime.fromisoformat(expiry_date_str.replace('Z', '+00:00')).replace(tzinfo=None)
+                        # Controlla se il codice è ancora valido
+                        if expiry_date > now:
+                            active_codes.append({
+                                'gift_code': code['giftcode'],
+                                'expiry_date': expiry_date_str,
+                                'created_at': code.get('created_at'),
+                                'status': 'active'
+                            })
+                    except Exception as e:
+                        logger.error(f"Error parsing expiry date for code {code['giftcode']}: {e}")
+                        # Se non riesci a parsare la data, considera il codice come attivo
+                        active_codes.append({
+                            'gift_code': code['giftcode'],
+                            'expiry_date': expiry_date_str,
+                            'created_at': code.get('created_at'),
+                            'status': 'active'
+                        })
             
-            session = requests.Session()
-            session.headers.update(headers)
+            logger.info(f"Found {len(active_codes)} active gift codes in database")
+            return active_codes
             
-            body_params = "&".join([f"{key}={value}" for key, value in encoded_data.items()])
-            
-            response = session.post(
-                "https://wos-giftcode-api.centurygame.com/api/gift_code",
-                data=body_params,
-                timeout=30
-            )
-            
-            result_data = response.json()
-            logger.info(f"Code verification result for {gift_code}: {result_data}")
-            
-            # Codice valido se non è scaduto e non è "CDK NOT FOUND"
-            if result_data.get("msg") in ["SUCCESS", "RECEIVED", "SAME TYPE EXCHANGE"]:
-                return True
-            elif result_data.get("msg") == "TIME ERROR.":
-                return False
-            elif result_data.get("msg") == "CDK NOT FOUND.":
-                return False
-            else:
-                return True  # Altri errori potrebbero essere temporanei
-                
         except Exception as e:
-            logger.error(f"Error verifying gift code {gift_code}: {e}")
-            return True  # In caso di errore, assumiamo sia valido
+            logger.error(f"Error getting active codes from database: {e}")
+            return []
     
     def extract_gift_code_info(self, message_content):
         """Estrae codice e data di scadenza dal messaggio"""
@@ -256,7 +252,7 @@ class DiscordGiftCodeMonitor:
             payload = {
                 "players": player_list,
                 "gift_code": gift_code,
-                "record_id": str(hash(f"{gift_code}_{datetime.now().timestamp()}"))
+                "record_id": f"{gift_code}_{int(datetime.now().timestamp())}"
             }
             
             response = requests.post(url, json=payload, timeout=30)
@@ -273,6 +269,82 @@ class DiscordGiftCodeMonitor:
             logger.error(f"Error starting bulk redeem worker: {e}")
             return None
     
+    def start_redeem_for_active_codes(self):
+        """Avvia i riscatti per tutti i codici attivi"""
+        try:
+            # Ottieni tutti i codici attivi dal database
+            active_codes = self.get_active_codes_from_database()
+            player_list = self.get_active_players_from_supabase()
+            
+            if not player_list:
+                logger.warning("No player configurations found - skipping automatic redeem")
+                return
+            
+            if not active_codes:
+                logger.info("No active gift codes found - skipping automatic redeem")
+                return
+            
+            logger.info(f"Starting automatic redeem for {len(active_codes)} active codes and {len(player_list)} players")
+            
+            for code_info in active_codes:
+                gift_code = code_info['gift_code']
+                
+                # Controlla se c'è già un worker attivo per questo codice
+                existing_worker = self.supabase.table("bulk_redeem_requests")\
+                    .select("*")\
+                    .eq("gift_code", gift_code)\
+                    .in_("status", ["running", "starting"])\
+                    .execute()
+                
+                if existing_worker.data:
+                    logger.info(f"Worker already running for code {gift_code}, skipping")
+                    continue
+                
+                # Avvia un nuovo worker per questo codice
+                logger.info(f"🚀 Starting automatic redeem for code: {gift_code}")
+                worker_result = self.start_bulk_redeem_worker(gift_code, player_list)
+                
+                if worker_result:
+                    logger.info(f"✅ Worker started successfully for code {gift_code}")
+                else:
+                    logger.error(f"❌ Failed to start worker for code {gift_code}")
+                
+                # Piccola pausa tra un worker e l'altro
+                import time
+                time.sleep(2)
+            
+            logger.info(f"✅ Started automatic redeem for {len(active_codes)} active codes")
+            
+        except Exception as e:
+            logger.error(f"Error starting redeem for active codes: {e}")
+    
+    async def daily_check(self):
+        """Esegue il check giornaliero"""
+        logger.info("Starting daily gift code check...")
+        
+        # Step 1: Cerca nuovi codici nel canale Discord
+        new_codes = await self.check_channel_for_new_codes()
+        
+        # Step 2: Salva nuovi codici
+        successful_saves = 0
+        for code_info in new_codes:
+            if self.save_gift_code_to_db(code_info):
+                successful_saves += 1
+                logger.info(f"✅ Saved new gift code: {code_info['gift_code']}")
+        
+        if successful_saves > 0:
+            logger.info(f"✅ Saved {successful_saves} new gift codes")
+        else:
+            logger.info("ℹ️ No new gift codes found or all codes were already in database")
+        
+        # Step 3: Avvia riscatti per TUTTI i codici attivi (nuovi e esistenti)
+        self.start_redeem_for_active_codes()
+        
+        # Step 4: Controlla e riavvia worker per codici ancora validi
+        self.check_and_restart_expired_workers()
+        
+        logger.info("Daily check completed")
+    
     def check_and_restart_expired_workers(self):
         """Controlla e riavvia worker per codici ancora validi"""
         try:
@@ -285,6 +357,7 @@ class DiscordGiftCodeMonitor:
                 .eq("status", "completed")\
                 .execute()
             
+            restarted_count = 0
             for worker in workers_result.data:
                 gift_code = worker['gift_codes']['giftcode']
                 expiry_date_str = worker['gift_codes']['expiry_date']
@@ -313,42 +386,13 @@ class DiscordGiftCodeMonitor:
                                 player_list = self.get_active_players_from_supabase()
                                 if player_list:
                                     self.start_bulk_redeem_worker(gift_code, player_list)
-                            
+                                    restarted_count += 1
+            
+            if restarted_count > 0:
+                logger.info(f"🔄 Restarted {restarted_count} workers for still-valid codes")
+            
         except Exception as e:
             logger.error(f"Error checking expired workers: {e}")
-    
-    async def daily_check(self):
-        """Esegue il check giornaliero"""
-        logger.info("Starting daily gift code check...")
-        
-        # Step 1: Cerca nuovi codici nel canale Discord
-        new_codes = await self.check_channel_for_new_codes()
-        
-        # Step 2: Salva nuovi codici e avvia worker
-        successful_saves = 0
-        for code_info in new_codes:
-            if self.save_gift_code_to_db(code_info):
-                successful_saves += 1
-                player_list = self.get_active_players_from_supabase()
-                if player_list:
-                    logger.info(f"Starting automatic redeem for {len(player_list)} players with code {code_info['gift_code']}")
-                    worker_result = self.start_bulk_redeem_worker(code_info['gift_code'], player_list)
-                    if worker_result:
-                        logger.info(f"✅ Worker started successfully for code {code_info['gift_code']}")
-                    else:
-                        logger.error(f"❌ Failed to start worker for code {code_info['gift_code']}")
-                else:
-                    logger.warning(f"No player configuration found. Code {code_info['gift_code']} saved but no automatic redeem started.")
-        
-        if successful_saves > 0:
-            logger.info(f"✅ Saved {successful_saves} new gift codes and started workers")
-        else:
-            logger.info("ℹ️ No new gift codes found or all codes were already in database")
-        
-        # Step 3: Controlla e riavvia worker per codici ancora validi
-        self.check_and_restart_expired_workers()
-        
-        logger.info("Daily check completed")
     
     async def start_monitoring(self):
         """Avvia il monitoraggio"""
