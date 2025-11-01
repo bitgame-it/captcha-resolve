@@ -153,47 +153,56 @@ class WikiGiftCodeScraper:
                     # Codice già esistente - aggiorna se necessario
                     existing_code = existing_codes[code]
                     if existing_code.get('status') != 'active':
-                        self.supabase.table("gift_codes")\
-                            .update({
-                                "status": "active",
-                                "updated_at": current_time
-                            })\
-                            .eq("giftcode", code)\
-                            .execute()
-                        codes_updated += 1
-                        logger.info(f"🔄 Updated code status to active: {code}")
+                        try:
+                            self.supabase.table("gift_codes")\
+                                .update({
+                                    "status": "active",
+                                    "updated_at": current_time
+                                })\
+                                .eq("giftcode", code)\
+                                .execute()
+                            codes_updated += 1
+                            logger.info(f"🔄 Updated code status to active: {code}")
+                        except Exception as e:
+                            logger.error(f"❌ Error updating code {code}: {e}")
                 else:
-                    # Nuovo codice - aggiungi
+                    # Nuovo codice - aggiungi (NON specificare l'ID)
                     expiry_date = self.calculate_expiry_date(code)
-                    self.supabase.table("gift_codes")\
-                        .insert({
-                            "giftcode": code,
-                            "date": current_time,
-                            "expiry_date": expiry_date.isoformat(),
-                            "discord_author": "wiki_scraper",
-                            "message_preview": "Added from wiki",
-                            "status": "active",
-                            "created_at": current_time,
-                            "updated_at": current_time
-                        })\
-                        .execute()
-                    new_codes_added += 1
-                    logger.info(f"✅ Added new code from wiki: {code}")
+                    try:
+                        self.supabase.table("gift_codes")\
+                            .insert({
+                                "giftcode": code,
+                                "date": current_time,
+                                "expiry_date": expiry_date.isoformat(),
+                                "discord_author": "wiki_scraper",
+                                "message_preview": "Added from wiki",
+                                "status": "active"
+                                # NON includere 'id', 'created_at', 'updated_at' - lasciati al database
+                            })\
+                            .execute()
+                        new_codes_added += 1
+                        logger.info(f"✅ Added new code from wiki: {code}")
+                    except Exception as e:
+                        logger.error(f"❌ Error adding code {code}: {e}")
+                        # Continua con il prossimo codice invece di fermarsi
             
             # Segna come scaduti i codici nella lista expired
             for code in expired_codes:
                 if code in existing_codes:
                     existing_code = existing_codes[code]
                     if existing_code.get('status') != 'expired':
-                        self.supabase.table("gift_codes")\
-                            .update({
-                                "status": "expired",
-                                "updated_at": current_time
-                            })\
-                            .eq("giftcode", code)\
-                            .execute()
-                        codes_expired += 1
-                        logger.info(f"🗑️ Marked code as expired: {code}")
+                        try:
+                            self.supabase.table("gift_codes")\
+                                .update({
+                                    "status": "expired",
+                                    "updated_at": current_time
+                                })\
+                                .eq("giftcode", code)\
+                                .execute()
+                            codes_expired += 1
+                            logger.info(f"🗑️ Marked code as expired: {code}")
+                        except Exception as e:
+                            logger.error(f"❌ Error expiring code {code}: {e}")
             
             logger.info(f"🎯 Database update: {new_codes_added} new, {codes_updated} updated, {codes_expired} expired")
             return new_codes_added, codes_updated, codes_expired
