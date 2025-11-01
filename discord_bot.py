@@ -51,16 +51,18 @@ class DiscordGiftCodeMonitor:
                 # Parse time
                 hour, minute = map(int, time_str.split(':'))
                 
-                # Crea datetime (assumiamo anno corrente)
+                # Crea datetime (assumiamo anno corrente e UTC)
                 current_year = datetime.now().year
-                return datetime(current_year, month, day, hour, minute)
+                return datetime(current_year, month, day, hour, minute).replace(tzinfo=None)
         except Exception as e:
             logger.error(f"Error parsing date {date_str}: {e}")
         return None
     
     def is_code_expired(self, expiry_date):
         """Controlla se il codice è scaduto"""
-        return datetime.now() > expiry_date
+        if not expiry_date:
+            return True
+        return datetime.now().replace(tzinfo=None) > expiry_date
     
     def encode_wos_data(self, data):
         """Encoding per le richieste WOS API"""
@@ -275,11 +277,11 @@ class DiscordGiftCodeMonitor:
         """Controlla e riavvia worker per codici ancora validi"""
         try:
             # Trova worker completati ieri che hanno codici ancora validi
-            yesterday = (datetime.now() - timedelta(days=1)).isoformat()
+            yesterday = (datetime.now() - timedelta(days=1)).replace(tzinfo=None)
             
             workers_result = self.supabase.table("bulk_redeem_requests")\
                 .select("*, gift_codes!inner(*)")\
-                .gte("updated_at", yesterday)\
+                .gte("updated_at", yesterday.isoformat())\
                 .eq("status", "completed")\
                 .execute()
             
@@ -288,12 +290,13 @@ class DiscordGiftCodeMonitor:
                 expiry_date_str = worker['gift_codes']['expiry_date']
                 
                 if expiry_date_str:
-                    expiry_date = datetime.fromisoformat(expiry_date_str.replace('Z', '+00:00'))
+                    # Converti la stringa in datetime (rimuovi timezone info se presente)
+                    expiry_date = datetime.fromisoformat(expiry_date_str.replace('Z', '+00:00')).replace(tzinfo=None)
                     
                     # Se il codice è ancora valido e il worker è vecchio di più di 12 ore
                     if not self.is_code_expired(expiry_date):
-                        worker_updated = datetime.fromisoformat(worker['updated_at'].replace('Z', '+00:00'))
-                        hours_since_update = (datetime.now() - worker_updated).total_seconds() / 3600
+                        worker_updated = datetime.fromisoformat(worker['updated_at'].replace('Z', '+00:00')).replace(tzinfo=None)
+                        hours_since_update = (datetime.now().replace(tzinfo=None) - worker_updated).total_seconds() / 3600
                         
                         if hours_since_update > 12:
                             logger.info(f"Restarting worker for still-valid code {gift_code}")
@@ -322,14 +325,25 @@ class DiscordGiftCodeMonitor:
         new_codes = await self.check_channel_for_new_codes()
         
         # Step 2: Salva nuovi codici e avvia worker
+        successful_saves = 0
         for code_info in new_codes:
             if self.save_gift_code_to_db(code_info):
+                successful_saves += 1
                 player_list = self.get_active_players_from_supabase()
                 if player_list:
                     logger.info(f"Starting automatic redeem for {len(player_list)} players with code {code_info['gift_code']}")
-                    self.start_bulk_redeem_worker(code_info['gift_code'], player_list)
+                    worker_result = self.start_bulk_redeem_worker(code_info['gift_code'], player_list)
+                    if worker_result:
+                        logger.info(f"✅ Worker started successfully for code {code_info['gift_code']}")
+                    else:
+                        logger.error(f"❌ Failed to start worker for code {code_info['gift_code']}")
                 else:
                     logger.warning(f"No player configuration found. Code {code_info['gift_code']} saved but no automatic redeem started.")
+        
+        if successful_saves > 0:
+            logger.info(f"✅ Saved {successful_saves} new gift codes and started workers")
+        else:
+            logger.info("ℹ️ No new gift codes found or all codes were already in database")
         
         # Step 3: Controlla e riavvia worker per codici ancora validi
         self.check_and_restart_expired_workers()
