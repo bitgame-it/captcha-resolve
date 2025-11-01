@@ -411,12 +411,14 @@ class BulkRedeemWorker:
         try:
             if supabase_client:
                 try:
+                    # Aggiorna lo stato a "running"
                     supabase_client.table("bulk_redeem_requests").update({
                         "status": "running",
                         "started_at": self.start_time.isoformat(),
                         "worker_id": self.worker_id,
                         "updated_at": self.start_time.isoformat()
                     }).eq("id", self.record_id).execute()
+                    logger.info(f"✅ Updated Supabase record to running: {self.record_id}")
                 except Exception as e:
                     logger.error(f"❌ Failed to update Supabase record: {e}")
             
@@ -496,8 +498,10 @@ class BulkRedeemWorker:
                 try:
                     supabase_client.table("bulk_redeem_requests").update({
                         "status": final_status,
-                        "updated_at": self.end_time.isoformat()
+                        "updated_at": self.end_time.isoformat(),
+                        "results": self.results
                     }).eq("id", self.record_id).execute()
+                    logger.info(f"✅ Updated final status in Supabase: {final_status}")
                 except Exception as e:
                     logger.error(f"❌ Failed to update final status in Supabase: {e}")
             
@@ -606,11 +610,36 @@ def start_bulk_redeem():
         gift_code = data['gift_code']
         record_id = data.get('record_id', str(uuid.uuid4()))
         
+        # Assicurati che record_id sia un UUID valido
+        try:
+            uuid.UUID(record_id)
+        except ValueError:
+            # Se non è un UUID valido, creane uno nuovo
+            record_id = str(uuid.uuid4())
+        
         if not isinstance(player_list, list) or len(player_list) == 0:
             return jsonify({'error': 'Invalid player list'}), 400
         
         if len(player_list) > 100:
             return jsonify({'error': 'Maximum 100 players allowed'}), 400
+        
+        # Crea il record nel database prima di avviare il worker
+        if supabase_client:
+            try:
+                supabase_client.table("bulk_redeem_requests").insert({
+                    "id": record_id,
+                    "gift_code": gift_code,
+                    "player_list": player_list,
+                    "status": "starting",
+                    "progress_current": 0,
+                    "progress_total": len(player_list),
+                    "created_at": datetime.now().isoformat(),
+                    "updated_at": datetime.now().isoformat()
+                }).execute()
+                logger.info(f"✅ Created Supabase record: {record_id}")
+            except Exception as e:
+                logger.error(f"❌ Failed to create Supabase record: {e}")
+                # Continua comunque, anche senza record nel database
         
         worker_id = str(uuid.uuid4())
         worker = BulkRedeemWorker(record_id, player_list, gift_code, worker_id)

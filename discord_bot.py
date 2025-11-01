@@ -7,6 +7,7 @@ import hashlib
 import os
 import logging
 import time
+import uuid
 from supabase import create_client
 
 # Configura logging
@@ -280,10 +281,14 @@ class DiscordGiftCodeMonitor:
         """Avvia un worker per il riscatto bulk"""
         try:
             url = f"{self.api_base_url}/api/start-bulk-redeem"
+            
+            # Usa UUID valido per il record_id
+            record_id = str(uuid.uuid4())
+            
             payload = {
                 "players": player_list,
                 "gift_code": gift_code,
-                "record_id": f"{gift_code}_{int(datetime.now().timestamp())}"
+                "record_id": record_id
             }
             
             logger.info(f"🔄 Sending request to backend: {url}")
