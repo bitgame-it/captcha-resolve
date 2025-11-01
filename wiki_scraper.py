@@ -42,70 +42,73 @@ class WikiGiftCodeScraper:
         try:
             soup = BeautifulSoup(html_content, 'html.parser')
             
-            # Cerca le sezioni "Active Codes" e "Expired Codes"
             active_codes = []
             expired_codes = []
             
-            # Metodo 1: Cerca per testo nei tag strong
+            # Trova tutti i tag strong per identificare le sezioni
             strong_tags = soup.find_all('strong')
-            for tag in strong_tags:
+            
+            for i, tag in enumerate(strong_tags):
                 text = tag.get_text().strip()
                 
                 if "Active Codes:" in text:
                     logger.info("📋 Found Active Codes section")
-                    # Cerca i codici dopo questo tag
-                    next_elements = tag.find_next_siblings()
-                    for elem in next_elements:
-                        if elem.name == 'ul':
-                            code_spans = elem.find_all('span', class_='code')
+                    # Cerca i codici attivi dopo questo tag
+                    current = tag.parent.find_next_sibling()
+                    while current and not current.find('strong', string=re.compile('Expired Codes:')):
+                        if current.name == 'ul':
+                            # Estrai codici dagli span dentro gli ul
+                            code_spans = current.find_all('span', class_='code')
                             for span in code_spans:
                                 code = span.get_text().strip()
                                 if code and code not in active_codes:
                                     active_codes.append(code)
                                     logger.info(f"✅ Found active code: {code}")
-                        elif "Expired Codes:" in elem.get_text():
-                            break
+                        current = current.find_next_sibling()
                 
                 elif "Expired Codes:" in text:
                     logger.info("📋 Found Expired Codes section")
-                    # Cerca i codici dopo questo tag
-                    next_elements = tag.find_next_siblings()
-                    for elem in next_elements:
-                        code_spans = elem.find_all('span', class_='code')
+                    # Cerca i codici scaduti dopo questo tag
+                    current = tag.parent.find_next_sibling()
+                    while current:
+                        # Cerca codici negli span
+                        code_spans = current.find_all('span', class_='code')
                         for span in code_spans:
                             code = span.get_text().strip()
                             if code and code not in expired_codes:
                                 expired_codes.append(code)
                                 logger.info(f"❌ Found expired code: {code}")
                         
-                        # Cerca anche testo diretto in div
-                        if elem.name == 'div' and not elem.find('span', class_='code'):
-                            text_content = elem.get_text().strip()
+                        # Cerca anche testo diretto nei div (per i codici senza span)
+                        if current.name == 'div':
+                            text_content = current.get_text().strip()
                             if text_content:
-                                # Estrai codici dal testo (parole in maiuscolo/misto)
-                                potential_codes = re.findall(r'\b[A-Z0-9][A-Za-z0-9]+\b', text_content)
-                                for code in potential_codes:
-                                    if len(code) >= 5 and code not in expired_codes:
-                                        expired_codes.append(code)
-                                        logger.info(f"❌ Found expired code from text: {code}")
+                                # Estrai potenziali codici (parole in maiuscolo/misto)
+                                lines = text_content.split('\n')
+                                for line in lines:
+                                    line = line.strip()
+                                    if line and not any(keyword in line.lower() for keyword in ['codes:', 'active', 'expired']):
+                                        # Considera come codice se è abbastanza lungo e non contiene spazi
+                                        if len(line) >= 5 and ' ' not in line and line not in expired_codes:
+                                            expired_codes.append(line)
+                                            logger.info(f"❌ Found expired code from text: {line}")
+                        
+                        # Fermati quando trovi il prossimo strong tag o fine sezione
+                        next_strong = current.find_next('strong')
+                        if next_strong:
+                            break
+                        current = current.find_next_sibling()
             
-            # Metodo 2: Cerca tutti gli span con classe 'code'
+            # Verifica che i codici con pulsanti copy siano attivi
             all_code_spans = soup.find_all('span', class_='code')
             for span in all_code_spans:
                 code = span.get_text().strip()
-                if code:
-                    # Determina se è attivo o scaduto basandosi sul contesto
-                    parent = span.find_parent()
-                    if parent:
-                        # Se è in un ul, probabilmente è attivo
-                        if parent.name == 'ul':
-                            if code not in active_codes:
-                                active_codes.append(code)
-                                logger.info(f"✅ Found active code via span: {code}")
-                        # Altrimenti potrebbe essere scaduto
-                        elif code not in active_codes and code not in expired_codes:
-                            expired_codes.append(code)
-                            logger.info(f"❌ Found expired code via span: {code}")
+                if code and code not in active_codes and code not in expired_codes:
+                    # Se ha un pulsante copy nelle vicinanze, probabilmente è attivo
+                    copy_btn = span.find_next('button', class_='copy-btn')
+                    if copy_btn:
+                        active_codes.append(code)
+                        logger.info(f"✅ Found active code with copy button: {code}")
             
             logger.info(f"📊 Parsing completed: {len(active_codes)} active, {len(expired_codes)} expired codes")
             return active_codes, expired_codes
