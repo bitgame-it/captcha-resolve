@@ -276,6 +276,7 @@ class BulkRedeemWorker:
         self.results = []
         self.start_time = None
         self.end_time = None
+        self.current_session = None
     
     def encode_wos_data(self, data):
         """Encoding per le richieste WOS API"""
@@ -285,8 +286,46 @@ class BulkRedeemWorker:
         sign = hashlib.md5((encoded_data + secret).encode()).hexdigest()
         return {**data, "sign": sign}
     
+    def create_wos_session(self):
+        """Crea una sessione WOS con gli header corretti"""
+        session = requests.Session()
+        
+        headers = {
+            "Accept": "application/json, text/plain, */*",
+            "Accept-Encoding": "gzip, deflate, br",
+            "Accept-Language": "it-IT,it;q=0.9,en;q=0.8",
+            "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8",
+            "Origin": "https://wos-giftcode.centurygame.com",
+            "Referer": "https://wos-giftcode.centurygame.com/",
+            "Sec-Ch-Ua": '"Not_A Brand";v="8", "Chromium";v="120", "Google Chrome";v="120"',
+            "Sec-Ch-Ua-Mobile": "?0",
+            "Sec-Ch-Ua-Platform": '"Windows"',
+            "Sec-Fetch-Dest": "empty",
+            "Sec-Fetch-Mode": "cors",
+            "Sec-Fetch-Site": "same-site",
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+            "X-Requested-With": "XMLHttpRequest"
+        }
+        
+        session.headers.update(headers)
+        return session
+    
+    def initialize_wos_session(self, session):
+        """Inizializza la sessione WOS con una richiesta GET"""
+        try:
+            logger.info("🔄 Initializing WOS session...")
+            init_response = session.get(
+                "https://wos-giftcode.centurygame.com/", 
+                timeout=15
+            )
+            logger.info(f"✅ Session init status: {init_response.status_code}")
+            return True
+        except Exception as e:
+            logger.warning(f"⚠️ Session init warning: {e}")
+            return False
+    
     def solve_captcha_for_wos(self, player_id):
-        """Risolvi il captcha per un singolo giocatore WOS"""
+        """Risolvi il captcha per un singolo giocatore WOS - VERSIONE CORRETTA"""
         try:
             timestamp = str(int(time.time() * 1000))
             data_to_encode = {
@@ -297,66 +336,45 @@ class BulkRedeemWorker:
             
             encoded_data = self.encode_wos_data(data_to_encode)
             
-            # HEADERS MIGLIORATI per l'autenticazione
-            headers = {
-                "accept": "application/json, text/plain, */*",
-                "content-type": "application/x-www-form-urlencoded",
-                "origin": "https://wos-giftcode.centurygame.com",
-                "referer": "https://wos-giftcode.centurygame.com/",
-                "user-agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-                "accept-language": "it-IT,it;q=0.9,en;q=0.8",
-                "sec-ch-ua": '"Not_A Brand";v="8", "Chromium";v="120", "Google Chrome";v="120"',
-                "sec-ch-ua-mobile": "?0",
-                "sec-ch-ua-platform": '"Windows"',
-                "sec-fetch-dest": "empty",
-                "sec-fetch-mode": "cors",
-                "sec-fetch-site": "same-site"
-            }
+            # Crea una nuova sessione per ogni giocatore
+            self.current_session = self.create_wos_session()
             
-            # Usa una sessione per mantenere i cookie
-            session = requests.Session()
-            session.headers.update(headers)
+            # Inizializza la sessione
+            self.initialize_wos_session(self.current_session)
             
-            # PRIMA fai una richiesta GET per inizializzare la sessione
-            try:
-                init_response = session.get("https://wos-giftcode.centurygame.com/", timeout=10)
-                logger.info(f"Session init: {init_response.status_code}")
-            except Exception as init_error:
-                logger.warning(f"Session init warning: {init_error}")
-            
-            # POI richiedi il captcha
-            response = session.post(
+            logger.info("🔄 Requesting captcha from WOS API...")
+            response = self.current_session.post(
                 "https://wos-giftcode-api.centurygame.com/api/captcha",
                 data=encoded_data,
                 timeout=30
             )
             
+            logger.info(f"📡 Captcha API response status: {response.status_code}")
+            
             captcha_data = response.json()
-            logger.info(f"Captcha API response status: {captcha_data.get('msg')}")
+            logger.info(f"📦 Captcha API response: {captcha_data}")
             
             if captcha_data.get("msg") == "SUCCESS" and captcha_data.get("data", {}).get("img"):
                 base64_image = captcha_data["data"]["img"]
                 
-                # Usa la funzione esistente per risolvere il captcha
+                # Risolvi il captcha
                 captcha_code, confidence = solve_captcha_internal(base64_image)
-                logger.info(f"Solved captcha for player {player_id}: {captcha_code} (confidence: {confidence:.3f})")
+                logger.info(f"🎯 Solved captcha for player {player_id}: {captcha_code} (confidence: {confidence:.3f})")
                 return captcha_code
             else:
-                raise Exception(f"Failed to load captcha: {captcha_data.get('msg')}")
-                
+                error_msg = captcha_data.get('msg', 'Unknown error')
+                logger.error(f"❌ Failed to load captcha: {error_msg}")
+                raise Exception(f"Failed to load captcha: {error_msg}")
+            
         except Exception as e:
-            logger.error(f"Error in captcha process for player {player_id}: {e}")
-            # Fallback
+            logger.error(f"❌ Error in captcha process for player {player_id}: {e}")
+            # Fallback con captcha casuale
             captcha_code, _ = generate_fallback_captcha()
             return captcha_code
 
-    def redeem_gift_code_for_player(self, player_id):
-        """Riscatta il codice regalo per un singolo giocatore"""
+    def redeem_gift_code_for_player(self, player_id, captcha_code):
+        """Riscatta il codice regalo per un singolo giocatore - VERSIONE CORRETTA"""
         try:
-            # Step 1: Risolvi il captcha
-            captcha_code = self.solve_captcha_for_wos(player_id)
-            
-            # Step 2: Riscatta il codice regalo
             timestamp = str(int(time.time() * 1000))
             redeem_data = {
                 "fid": player_id,
@@ -367,25 +385,14 @@ class BulkRedeemWorker:
             
             encoded_redeem_data = self.encode_wos_data(redeem_data)
             
-            # HEADERS MIGLIORATI per il redeem
-            headers = {
-                "accept": "application/json, text/plain, */*",
-                "content-type": "application/x-www-form-urlencoded",
-                "origin": "https://wos-giftcode.centurygame.com",
-                "referer": "https://wos-giftcode.centurygame.com/",
-                "user-agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-                "accept-language": "it-IT,it;q=0.9,en;q=0.8"
-            }
+            logger.info("🔄 Sending redeem request...")
             
-            # Usa una sessione per mantenere i cookie
-            session = requests.Session()
-            session.headers.update(headers)
-            
-            # Inizializza la sessione
-            try:
-                init_response = session.get("https://wos-giftcode.centurygame.com/", timeout=10)
-            except:
-                pass
+            # Usa la sessione esistente dal captcha
+            if self.current_session:
+                session = self.current_session
+            else:
+                session = self.create_wos_session()
+                self.initialize_wos_session(session)
             
             response = session.post(
                 "https://wos-giftcode-api.centurygame.com/api/gift_code",
@@ -393,66 +400,79 @@ class BulkRedeemWorker:
                 timeout=30
             )
             
+            logger.info(f"📡 Redeem API response status: {response.status_code}")
             result_data = response.json()
-            logger.info(f"Redeem result for player {player_id}: {result_data}")
+            logger.info(f"📦 Redeem API response: {result_data}")
+            
+            # Pulisci la sessione dopo il redeem
+            self.current_session = None
             
             # Interpreta il risultato
-            if result_data.get("msg") == "SUCCESS":
-                return {
-                    'player_id': player_id,
-                    'success': True,
-                    'message': 'Codice riscattato con successo',
-                    'timestamp': datetime.now().isoformat()
-                }
-            elif result_data.get("msg") == "RECEIVED." and result_data.get("err_code") == 40008:
-                return {
-                    'player_id': player_id,
-                    'success': True, 
-                    'message': 'Codice già riscattato precedentemente',
-                    'timestamp': datetime.now().isoformat()
-                }
-            elif result_data.get("msg") == "CDK NOT FOUND." and result_data.get("err_code") == 40014:
-                return {
-                    'player_id': player_id,
-                    'success': False,
-                    'error': 'Codice regalo non valido',
-                    'timestamp': datetime.now().isoformat()
-                }
-            elif result_data.get("msg") == "TIME ERROR." and result_data.get("err_code") == 40007:
-                return {
-                    'player_id': player_id,
-                    'success': False,
-                    'error': 'Codice regalo scaduto',
-                    'timestamp': datetime.now().isoformat()
-                }
-            elif result_data.get("msg") == "CAPTCHA ERROR.":
-                return {
-                    'player_id': player_id,
-                    'success': False,
-                    'error': f'Errore captcha (soluzione: {captcha_code})',
-                    'timestamp': datetime.now().isoformat()
-                }
-            elif result_data.get("msg") == "NOT LOGIN.":
-                return {
-                    'player_id': player_id,
-                    'success': False,
-                    'error': 'Errore autenticazione: sessione non valida',
-                    'timestamp': datetime.now().isoformat()
-                }
-            else:
-                return {
-                    'player_id': player_id,
-                    'success': False,
-                    'error': result_data.get("msg", "Errore sconosciuto"),
-                    'timestamp': datetime.now().isoformat()
-                }
-                    
+            return self.interpret_redeem_result(player_id, result_data, captcha_code)
+            
         except Exception as e:
-            logger.error(f"Error redeeming gift code for player {player_id}: {e}")
+            logger.error(f"❌ Error redeeming gift code for player {player_id}: {e}")
+            # Pulisci la sessione in caso di errore
+            self.current_session = None
             return {
                 'player_id': player_id,
                 'success': False,
                 'error': str(e),
+                'timestamp': datetime.now().isoformat()
+            }
+    
+    def interpret_redeem_result(self, player_id, result_data, captcha_code):
+        """Interpreta la risposta del redeem"""
+        message = result_data.get("msg", "")
+        error_code = result_data.get("err_code")
+        
+        if message == "SUCCESS":
+            return {
+                'player_id': player_id,
+                'success': True,
+                'message': 'Codice riscattato con successo',
+                'timestamp': datetime.now().isoformat()
+            }
+        elif message == "RECEIVED." and error_code == 40008:
+            return {
+                'player_id': player_id,
+                'success': True, 
+                'message': 'Codice già riscattato precedentemente',
+                'timestamp': datetime.now().isoformat()
+            }
+        elif message == "CDK NOT FOUND." and error_code == 40014:
+            return {
+                'player_id': player_id,
+                'success': False,
+                'error': 'Codice regalo non valido',
+                'timestamp': datetime.now().isoformat()
+            }
+        elif message == "TIME ERROR." and error_code == 40007:
+            return {
+                'player_id': player_id,
+                'success': False,
+                'error': 'Codice regalo scaduto',
+                'timestamp': datetime.now().isoformat()
+            }
+        elif message == "CAPTCHA ERROR.":
+            return {
+                'player_id': player_id,
+                'success': False,
+                'error': f'Errore captcha (soluzione provata: {captcha_code})',
+                'timestamp': datetime.now().isoformat()
+            }
+        elif message == "NOT LOGIN.":
+            return {
+                'player_id': player_id,
+                'success': False,
+                'error': 'Errore autenticazione: sessione non valida',
+                'timestamp': datetime.now().isoformat()
+            }
+        else:
+            return {
+                'player_id': player_id,
+                'success': False,
+                'error': f"{message} (code: {error_code})",
                 'timestamp': datetime.now().isoformat()
             }
     
@@ -478,13 +498,13 @@ class BulkRedeemWorker:
             logger.error(f"Error updating Supabase progress: {e}")
     
     def run(self):
-        """Esegue il worker per il riscatto bulk"""
+        """Esegue il worker per il riscatto bulk - VERSIONE CORRETTA"""
         self.status = "running"
         self.start_time = datetime.now()
         active_workers[self.worker_id] = self
         
         try:
-            # Aggiorna Supabase all'inizio (se disponibile)
+            # Aggiorna Supabase all'inizio
             if supabase_client:
                 try:
                     supabase_client.table("bulk_redeem_requests").update({
@@ -505,8 +525,22 @@ class BulkRedeemWorker:
                 
                 logger.info(f"🔄 Processing player {i+1}/{self.total}: {player_id}")
                 
-                # Processa il giocatore
-                result = self.redeem_gift_code_for_player(player_id)
+                try:
+                    # Step 1: Risolvi il captcha
+                    captcha_code = self.solve_captcha_for_wos(player_id)
+                    
+                    # Step 2: Riscatta il codice regalo
+                    result = self.redeem_gift_code_for_player(player_id, captcha_code)
+                    
+                except Exception as e:
+                    logger.error(f"❌ Error processing player {player_id}: {e}")
+                    result = {
+                        'player_id': player_id,
+                        'success': False,
+                        'error': str(e),
+                        'timestamp': datetime.now().isoformat()
+                    }
+                
                 self.results.append(result)
                 self.progress = i + 1
                 
@@ -516,8 +550,8 @@ class BulkRedeemWorker:
                 success_status = "✅" if result.get('success') else "❌"
                 logger.info(f"{success_status} Player {player_id} processed: {result.get('message', result.get('error', 'Unknown'))}")
                 
-                # Piccola pausa per non sovraccaricare le API
-                time.sleep(2)
+                # Pausa più lunga tra le richieste per evitare rate limiting
+                time.sleep(3)
             
             # Determina lo stato finale
             if self.status == "stopped":
