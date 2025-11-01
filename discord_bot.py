@@ -75,7 +75,7 @@ class DiscordGiftCodeMonitor:
         try:
             timestamp = str(int(datetime.now().timestamp()))
             test_data = {
-                "fid": "244886619",  # ID di test
+                "fid": "398483320",  # ID di test
                 "cdk": gift_code,
                 "time": timestamp
             }
@@ -221,13 +221,33 @@ class DiscordGiftCodeMonitor:
             return False
     
     def get_active_players_from_supabase(self):
-        """Recupera la lista di player attivi da Supabase"""
+        """Recupera la lista di player attivi da TUTTI gli utenti Supabase"""
         try:
-            result = self.supabase.table("users").select("fid").execute()
-            player_ids = [row['fid'] for row in result.data]
-            logger.info(f"Found {len(player_ids)} active players")
-            return player_ids
+            # Cerca TUTTE le configurazioni di TUTTI gli utenti
+            result = self.supabase.table("bulk_redeem_requests")\
+                .select("player_list, user_id")\
+                .is_("gift_code", "null")\
+                .not_("player_list", "is", "null")\
+                .execute()
             
+            if result.data and len(result.data) > 0:
+                # Combina TUTTI i player_list di TUTTI gli utenti
+                all_player_ids = []
+                user_count = len(set(record['user_id'] for record in result.data if record.get('user_id')))
+                
+                for record in result.data:
+                    if record.get('player_list'):
+                        all_player_ids.extend(record['player_list'])
+                
+                # Rimuovi duplicati (se lo stesso player ID è in più liste utente)
+                unique_player_ids = list(set(all_player_ids))
+                
+                logger.info(f"Found {len(unique_player_ids)} unique players from {user_count} users")
+                return unique_player_ids
+            else:
+                logger.warning("No player configurations found in database")
+                return []
+                
         except Exception as e:
             logger.error(f"Error getting active players: {e}")
             return []
@@ -302,7 +322,10 @@ class DiscordGiftCodeMonitor:
             if self.save_gift_code_to_db(code_info):
                 player_list = self.get_active_players_from_supabase()
                 if player_list:
+                    logger.info(f"Starting automatic redeem for {len(player_list)} players with code {code_info['gift_code']}")
                     self.start_bulk_redeem_worker(code_info['gift_code'], player_list)
+                else:
+                    logger.warning(f"No player configuration found. Code {code_info['gift_code']} saved but no automatic redeem started.")
         
         # Step 3: Controlla e riavvia worker per codici ancora validi
         self.check_and_restart_expired_workers()
