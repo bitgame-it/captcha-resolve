@@ -272,15 +272,39 @@ class DiscordGiftCodeMonitor:
             logger.error(f"Error getting active players: {e}")
             return []
     
+    def get_players_to_process(self, gift_code, all_players):
+        """Filtra i player che non hanno ancora riscattato questo codice"""
+        try:
+            if not all_players:
+                return []
+            
+            # Controlla quali player hanno già riscattato
+            result = self.supabase.table("redeem_history")\
+                .select("player_id")\
+                .eq("gift_code", gift_code)\
+                .eq("success", True)\
+                .in_("player_id", all_players)\
+                .execute()
+            
+            already_redeemed = {row['player_id'] for row in result.data}
+            players_to_process = [p for p in all_players if p not in already_redeemed]
+            
+            logger.info(f"🎯 Filtered players for {gift_code}: {len(players_to_process)} to process, {len(already_redeemed)} already redeemed")
+            return players_to_process
+            
+        except Exception as e:
+            logger.error(f"Error filtering players for {gift_code}: {e}")
+            return all_players  # In caso di errore, processa tutti
+    
     def cleanup_old_workers(self):
         """Pulisce i worker vecchi dal database"""
         try:
-            # Trova worker completati con più di 1 giorno
-            one_day_ago = (datetime.now() - timedelta(days=1)).replace(tzinfo=None)
+            # Trova worker completati con più di 12 ore
+            twelve_hours_ago = (datetime.now() - timedelta(hours=12)).replace(tzinfo=None)
             
             old_workers = self.supabase.table("bulk_redeem_requests")\
-                .select("id")\
-                .lt("updated_at", one_day_ago.isoformat())\
+                .select("id, gift_code, status, updated_at")\
+                .lt("updated_at", twelve_hours_ago.isoformat())\
                 .in_("status", ["completed", "failed", "stopped"])\
                 .execute()
             
@@ -330,9 +354,9 @@ class DiscordGiftCodeMonitor:
         try:
             # Ottieni tutti i codici attivi dal database
             active_codes = self.get_active_codes_from_database()
-            player_list = self.get_active_players_from_supabase()
+            all_players = self.get_active_players_from_supabase()
             
-            if not player_list:
+            if not all_players:
                 logger.warning("No player configurations found - skipping automatic redeem")
                 return
             
@@ -340,11 +364,18 @@ class DiscordGiftCodeMonitor:
                 logger.info("No active gift codes found - skipping automatic redeem")
                 return
             
-            logger.info(f"Starting automatic redeem for {len(active_codes)} active codes and {len(player_list)} players")
+            logger.info(f"Starting automatic redeem for {len(active_codes)} active codes and {len(all_players)} total players")
             
             workers_started = 0
             for code_info in active_codes:
                 gift_code = code_info['gift_code']
+                
+                # Filtra i player che non hanno ancora riscattato questo codice
+                players_to_process = self.get_players_to_process(gift_code, all_players)
+                
+                if not players_to_process:
+                    logger.info(f"⏭️ All players have already redeemed {gift_code}, skipping")
+                    continue
                 
                 # Controlla se c'è già un worker attivo per questo codice (solo running/starting)
                 existing_worker = self.supabase.table("bulk_redeem_requests")\
@@ -357,14 +388,26 @@ class DiscordGiftCodeMonitor:
                     logger.info(f"Worker already running for code {gift_code}, skipping")
                     continue
                 
+                # CONTROLLO MIGLIORATO: Verifica se c'è già un worker COMPLETATO di recente per questo codice
+                recent_worker = self.supabase.table("bulk_redeem_requests")\
+                    .select("*")\
+                    .eq("gift_code", gift_code)\
+                    .eq("status", "completed")\
+                    .gte("updated_at", (datetime.now() - timedelta(hours=6)).isoformat())\
+                    .execute()
+                
+                if recent_worker.data:
+                    logger.info(f"🔄 Code {gift_code} was already processed in the last 6 hours, skipping")
+                    continue
+                
                 # Verifica nuovamente che l'API sia disponibile prima di ogni chiamata
                 if not self.is_api_available():
                     logger.error("❌ API became unavailable during processing - stopping")
                     break
                 
-                # Avvia un nuovo worker per questo codice
-                logger.info(f"🚀 Starting automatic redeem for code: {gift_code}")
-                worker_result = self.start_bulk_redeem_worker(gift_code, player_list)
+                # Avvia un nuovo worker per questo codice SOLO con player che non l'hanno riscattato
+                logger.info(f"🚀 Starting automatic redeem for code: {gift_code} with {len(players_to_process)} players")
+                worker_result = self.start_bulk_redeem_worker(gift_code, players_to_process)
                 
                 if worker_result:
                     logger.info(f"✅ Worker started successfully for code {gift_code}")
@@ -378,7 +421,7 @@ class DiscordGiftCodeMonitor:
             if workers_started > 0:
                 logger.info(f"✅ Started automatic redeem for {workers_started} active codes")
             else:
-                logger.info("ℹ️ All codes already have active workers running or API issues")
+                logger.info("ℹ️ All codes already processed or no players to redeem")
             
         except Exception as e:
             logger.error(f"Error starting redeem for active codes: {e}")
@@ -421,9 +464,10 @@ class DiscordGiftCodeMonitor:
                             
                             # Se non esiste un worker attivo, avviane uno nuovo
                             if not existing_worker.data:
-                                player_list = self.get_active_players_from_supabase()
-                                if player_list:
-                                    self.start_bulk_redeem_worker(gift_code, player_list)
+                                all_players = self.get_active_players_from_supabase()
+                                players_to_process = self.get_players_to_process(gift_code, all_players)
+                                if players_to_process:
+                                    self.start_bulk_redeem_worker(gift_code, players_to_process)
                                     restarted_count += 1
             
             if restarted_count > 0:

@@ -216,6 +216,47 @@ class BulkRedeemWorker:
         sign = hashlib.md5((encoded_data + secret).encode()).hexdigest()
         return {**data, "sign": sign}
     
+    def check_already_redeemed(self, player_id, gift_code):
+        """Controlla se il player ha già riscattato questo codice"""
+        try:
+            if not supabase_client:
+                return False
+                
+            result = supabase_client.table("redeem_history")\
+                .select("id, success")\
+                .eq("player_id", player_id)\
+                .eq("gift_code", gift_code)\
+                .eq("success", True)\
+                .execute()
+            
+            return len(result.data) > 0
+            
+        except Exception as e:
+            logger.error(f"Error checking redeem history for {player_id}: {e}")
+            return False
+
+    def record_redeem_attempt(self, player_id, gift_code, success, message):
+        """Registra un tentativo di riscatto"""
+        try:
+            if not supabase_client:
+                return
+                
+            data = {
+                "player_id": player_id,
+                "gift_code": gift_code,
+                "success": success,
+                "message": message,
+                "redeemed_at": datetime.now().isoformat()
+            }
+            
+            # Usa upsert per aggiornare se esiste già
+            supabase_client.table("redeem_history")\
+                .upsert(data, on_conflict='player_id,gift_code')\
+                .execute()
+                
+        except Exception as e:
+            logger.error(f"Error recording redeem attempt for {player_id}: {e}")
+    
     def get_wos_session(self, player_id):
         """Ottieni una sessione WOS autenticata"""
         try:
@@ -429,6 +470,21 @@ class BulkRedeemWorker:
                 
                 logger.info(f"🔄 Processing player {i+1}/{self.total}: {player_id}")
                 
+                # CONTROLLO: Salta se il player ha già riscattato questo codice
+                if self.check_already_redeemed(player_id, self.gift_code):
+                    result = {
+                        'player_id': player_id,
+                        'success': True,
+                        'message': 'Codice già riscattato precedentemente (cached)',
+                        'timestamp': datetime.now().isoformat(),
+                        'cached': True
+                    }
+                    self.results.append(result)
+                    self.progress = i + 1
+                    self.update_supabase_progress()
+                    logger.info(f"⏭️ Skipping player {player_id} - already redeemed {self.gift_code}")
+                    continue
+                
                 try:
                     session = self.get_wos_session(player_id)
                     if not session:
@@ -439,12 +495,21 @@ class BulkRedeemWorker:
                             'timestamp': datetime.now().isoformat()
                         }
                         self.results.append(result)
+                        self.record_redeem_attempt(player_id, self.gift_code, False, 'Auth failed')
                         self.progress = i + 1
                         self.update_supabase_progress()
                         continue
                     
                     captcha_code = self.solve_captcha_for_wos(player_id, session)
                     result = self.redeem_gift_code_for_player(player_id, session, captcha_code)
+                    
+                    # Registra il risultato nel history
+                    self.record_redeem_attempt(
+                        player_id, 
+                        self.gift_code, 
+                        result.get('success', False), 
+                        result.get('message', result.get('error', 'Unknown'))
+                    )
                     
                 except Exception as e:
                     logger.error(f"❌ Error processing player {player_id}: {e}")
@@ -454,6 +519,7 @@ class BulkRedeemWorker:
                         'error': str(e),
                         'timestamp': datetime.now().isoformat()
                     }
+                    self.record_redeem_attempt(player_id, self.gift_code, False, str(e))
                 
                 self.results.append(result)
                 self.progress = i + 1
@@ -470,7 +536,8 @@ class BulkRedeemWorker:
                 final_status = "completed"
                 self.status = "completed"
                 successful = len([r for r in self.results if r.get('success', False)])
-                logger.info(f"✅ Worker {self.worker_id} completed: {successful}/{self.total} successful")
+                cached = len([r for r in self.results if r.get('cached', False)])
+                logger.info(f"✅ Worker {self.worker_id} completed: {successful}/{self.total} successful ({cached} cached)")
             
         except Exception as e:
             logger.error(f"❌ Error in bulk redeem worker {self.worker_id}: {e}")
@@ -487,7 +554,8 @@ class BulkRedeemWorker:
                 'summary': {
                     'total': self.total,
                     'successful': len([r for r in self.results if r.get('success', False)]),
-                    'failed': len([r for r in self.results if not r.get('success', True)])
+                    'failed': len([r for r in self.results if not r.get('success', True)]),
+                    'cached': len([r for r in self.results if r.get('cached', False)])
                 },
                 'start_time': self.start_time.isoformat() if self.start_time else None,
                 'end_time': self.end_time.isoformat() if self.end_time else None,
