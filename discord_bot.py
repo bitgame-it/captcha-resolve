@@ -39,6 +39,31 @@ class DiscordGiftCodeMonitor:
             'Jul': 7, 'Aug': 8, 'Sep': 9, 'Oct': 10, 'Nov': 11, 'Dec': 12
         }
     
+    def is_api_available(self):
+        """Controlla se l'API Flask è disponibile"""
+        try:
+            url = f"{self.api_base_url}/health"
+            logger.info(f"🔍 Checking API availability at: {url}")
+            response = requests.get(url, timeout=10)
+            
+            if response.status_code == 200:
+                data = response.json()
+                logger.info(f"✅ API is available - Status: {data.get('status', 'unknown')}")
+                return True
+            else:
+                logger.warning(f"⚠️ API returned status code: {response.status_code}")
+                return False
+                
+        except requests.exceptions.ConnectionError as e:
+            logger.error(f"❌ API connection failed: {e}")
+            return False
+        except requests.exceptions.Timeout as e:
+            logger.error(f"⏰ API request timeout: {e}")
+            return False
+        except Exception as e:
+            logger.error(f"❌ Error checking API availability: {e}")
+            return False
+    
     def parse_date(self, date_str):
         """Converte la stringa della data in datetime object"""
         try:
@@ -308,6 +333,11 @@ class DiscordGiftCodeMonitor:
                     logger.info(f"Worker already running for code {gift_code}, skipping")
                     continue
                 
+                # Verifica nuovamente che l'API sia disponibile prima di ogni chiamata
+                if not self.is_api_available():
+                    logger.error("❌ API became unavailable during processing - stopping")
+                    break
+                
                 # Avvia un nuovo worker per questo codice
                 logger.info(f"🚀 Starting automatic redeem for code: {gift_code}")
                 worker_result = self.start_bulk_redeem_worker(gift_code, player_list)
@@ -324,7 +354,7 @@ class DiscordGiftCodeMonitor:
             if workers_started > 0:
                 logger.info(f"✅ Started automatic redeem for {workers_started} active codes")
             else:
-                logger.info("ℹ️ All codes already have active workers running")
+                logger.info("ℹ️ All codes already have active workers running or API issues")
             
         except Exception as e:
             logger.error(f"Error starting redeem for active codes: {e}")
@@ -382,6 +412,26 @@ class DiscordGiftCodeMonitor:
         """Esegue il check giornaliero"""
         logger.info("Starting daily gift code check...")
         
+        # Step 0: Controlla se l'API è disponibile
+        if not self.is_api_available():
+            logger.error("❌ API not available - skipping automatic redeem operations")
+            
+            # Fallback: salva solo i nuovi codici senza avviare worker
+            new_codes = await self.check_channel_for_new_codes()
+            successful_saves = 0
+            
+            for code_info in new_codes:
+                if self.save_gift_code_to_db(code_info):
+                    successful_saves += 1
+                    logger.info(f"✅ Saved new gift code (API offline): {code_info['gift_code']}")
+            
+            if successful_saves > 0:
+                logger.info(f"✅ Saved {successful_saves} new gift codes (API offline mode)")
+            else:
+                logger.info("ℹ️ No new gift codes found (API offline mode)")
+            
+            return
+        
         # Step 1: Cerca nuovi codici nel canale Discord
         new_codes = await self.check_channel_for_new_codes()
         
@@ -397,13 +447,15 @@ class DiscordGiftCodeMonitor:
         else:
             logger.info("ℹ️ No new gift codes found or all codes were already in database")
         
-        # Step 3: Avvia riscatti per TUTTI i codici attivi (nuovi e esistenti)
+        # Step 3: Avvia riscatti per TUTTI i codici attivi (solo se API è disponibile)
+        logger.info("🔄 Starting automatic redeem for active codes...")
         self.start_redeem_for_active_codes()
         
         # Step 4: Controlla e riavvia worker per codici ancora validi
+        logger.info("🔄 Checking and restarting expired workers...")
         self.check_and_restart_expired_workers()
         
-        logger.info("Daily check completed")
+        logger.info("✅ Daily check completed")
     
     async def start_monitoring(self):
         """Avvia il monitoraggio"""
