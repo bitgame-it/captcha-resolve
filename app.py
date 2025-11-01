@@ -207,6 +207,7 @@ class BulkRedeemWorker:
         self.results = []
         self.start_time = None
         self.end_time = None
+        self.last_auth_time = None  # Aggiunto per tracciare l'ultima autenticazione
     
     def encode_wos_data(self, data):
         """Encoding per le richieste WOS API"""
@@ -257,9 +258,21 @@ class BulkRedeemWorker:
         except Exception as e:
             logger.error(f"Error recording redeem attempt for {player_id}: {e}")
     
+    def wait_for_auth_cooldown(self):
+        """Attende il cooldown di 40 secondi tra le autenticazioni"""
+        if self.last_auth_time is not None:
+            time_since_last_auth = time.time() - self.last_auth_time
+            if time_since_last_auth < 40:
+                wait_time = 40 - time_since_last_auth
+                logger.info(f"⏳ Waiting {wait_time:.1f} seconds before next authentication (cooldown)...")
+                time.sleep(wait_time)
+    
     def get_wos_session(self, player_id):
         """Ottieni una sessione WOS autenticata"""
         try:
+            # ⏰ ATTENDE IL COOLDOWN PRIMA DI OGNI AUTENTICAZIONE
+            self.wait_for_auth_cooldown()
+            
             timestamp = str(int(time.time()))
             data_to_encode = {
                 "fid": player_id,
@@ -290,13 +303,16 @@ class BulkRedeemWorker:
             
             if auth_data.get("msg") == "success":
                 logger.info(f"✅ Player {player_id} authenticated successfully")
+                self.last_auth_time = time.time()  # Aggiorna il timestamp dell'ultima autenticazione
                 return session
             else:
                 logger.error(f"❌ Failed to authenticate player {player_id}: {auth_data.get('msg')}")
+                self.last_auth_time = time.time()  # Aggiorna comunque per evitare rate limiting
                 return None
                 
         except Exception as e:
             logger.error(f"❌ Error authenticating player {player_id}: {e}")
+            self.last_auth_time = time.time()  # Aggiorna comunque per evitare rate limiting
             return None
 
     def solve_captcha_for_wos(self, player_id, session):
@@ -486,6 +502,7 @@ class BulkRedeemWorker:
                     continue
                 
                 try:
+                    # ⏰ L'autenticazione ora gestisce internamente il cooldown di 40 secondi
                     session = self.get_wos_session(player_id)
                     if not session:
                         result = {
@@ -500,6 +517,7 @@ class BulkRedeemWorker:
                         self.update_supabase_progress()
                         continue
                     
+                    # Queste operazioni vengono eseguite solo dopo il cooldown
                     captcha_code = self.solve_captcha_for_wos(player_id, session)
                     result = self.redeem_gift_code_for_player(player_id, session, captcha_code)
                     
@@ -528,6 +546,7 @@ class BulkRedeemWorker:
                 success_status = "✅" if result.get('success') else "❌"
                 logger.info(f"{success_status} Player {player_id} processed: {result.get('message', result.get('error', 'Unknown'))}")
                 
+                # Piccola pausa standard tra un player e l'altro (mantenuta)
                 time.sleep(2)
             
             if self.status == "stopped":
