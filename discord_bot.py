@@ -298,9 +298,18 @@ class DiscordGiftCodeMonitor:
                         if hours_since_update > 12:
                             logger.info(f"Restarting worker for still-valid code {gift_code}")
                             
-                            player_list = self.get_active_players_from_supabase()
-                            if player_list:
-                                self.start_bulk_redeem_worker(gift_code, player_list)
+                            # Cerca se esiste già un worker attivo per questo codice
+                            existing_worker = self.supabase.table("bulk_redeem_requests")\
+                                .select("*")\
+                                .eq("gift_code", gift_code)\
+                                .in_("status", ["running", "starting"])\
+                                .execute()
+                            
+                            # Se non esiste un worker attivo, avviane uno nuovo
+                            if not existing_worker.data:
+                                player_list = self.get_active_players_from_supabase()
+                                if player_list:
+                                    self.start_bulk_redeem_worker(gift_code, player_list)
                             
         except Exception as e:
             logger.error(f"Error checking expired workers: {e}")
