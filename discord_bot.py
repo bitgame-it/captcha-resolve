@@ -219,18 +219,23 @@ class DiscordGiftCodeMonitor:
             # Cerca TUTTE le configurazioni di TUTTI gli utenti
             result = self.supabase.table("bulk_redeem_requests")\
                 .select("player_list, user_id")\
-                .is_("gift_code", "null")\
-                .not_("player_list", "is", "null")\
                 .execute()
             
-            if result.data and len(result.data) > 0:
+            # Filtra i record che hanno gift_code null e player_list non null
+            config_records = []
+            for record in result.data:
+                if (record.get('gift_code') is None and 
+                    record.get('player_list') is not None and 
+                    len(record.get('player_list', [])) > 0):
+                    config_records.append(record)
+            
+            if config_records:
                 # Combina TUTTI i player_list di TUTTI gli utenti
                 all_player_ids = []
-                user_count = len(set(record['user_id'] for record in result.data if record.get('user_id')))
+                user_count = len(set(record['user_id'] for record in config_records if record.get('user_id')))
                 
-                for record in result.data:
-                    if record.get('player_list'):
-                        all_player_ids.extend(record['player_list'])
+                for record in config_records:
+                    all_player_ids.extend(record['player_list'])
                 
                 # Rimuovi duplicati (se lo stesso player ID è in più liste utente)
                 unique_player_ids = list(set(all_player_ids))
@@ -286,6 +291,7 @@ class DiscordGiftCodeMonitor:
             
             logger.info(f"Starting automatic redeem for {len(active_codes)} active codes and {len(player_list)} players")
             
+            workers_started = 0
             for code_info in active_codes:
                 gift_code = code_info['gift_code']
                 
@@ -306,14 +312,17 @@ class DiscordGiftCodeMonitor:
                 
                 if worker_result:
                     logger.info(f"✅ Worker started successfully for code {gift_code}")
+                    workers_started += 1
                 else:
                     logger.error(f"❌ Failed to start worker for code {gift_code}")
                 
                 # Piccola pausa tra un worker e l'altro
-                import time
                 time.sleep(2)
             
-            logger.info(f"✅ Started automatic redeem for {len(active_codes)} active codes")
+            if workers_started > 0:
+                logger.info(f"✅ Started automatic redeem for {workers_started} active codes")
+            else:
+                logger.info("ℹ️ All codes already have active workers running")
             
         except Exception as e:
             logger.error(f"Error starting redeem for active codes: {e}")
