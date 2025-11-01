@@ -170,11 +170,6 @@ class DiscordGiftCodeMonitor:
                         logger.info(f"Code {gift_code} is expired, skipping")
                         continue
                     
-                    # Verifica se il codice è valido
-                    if not self.verify_gift_code(gift_code):
-                        logger.info(f"Code {gift_code} is invalid, skipping")
-                        continue
-                    
                     # Controlla se il codice è già nel database
                     existing_code = self.supabase.table("gift_codes")\
                         .select("*")\
