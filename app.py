@@ -224,13 +224,22 @@ class BulkRedeemWorker:
                 return False
                 
             result = supabase_client.table("redeem_history")\
-                .select("id, success")\
+                .select("id, success, message")\
                 .eq("player_id", player_id)\
                 .eq("gift_code", gift_code)\
-                .eq("success", True)\
                 .execute()
             
-            return len(result.data) > 0
+            # Controlla se c'è almeno un record con success=True
+            # OPPURE se c'è un record con messaggio che indica già riscattato
+            for record in result.data:
+                if record.get('success') is True:
+                    return True
+                # Se il messaggio indica che era già riscattato, considera come già fatto
+                message = record.get('message', '').lower()
+                if any(phrase in message for phrase in ['già riscattato', 'already redeemed', 'used']):
+                    return True
+            
+            return False
             
         except Exception as e:
             logger.error(f"Error checking redeem history for {player_id}: {e}")
@@ -406,6 +415,13 @@ class BulkRedeemWorker:
                 'message': 'Codice già riscattato precedentemente',
                 'timestamp': datetime.now().isoformat()
             }
+        elif message == "USED." and error_code == 40005:  # AGGIUNTO QUESTO CASO
+            return {
+                'player_id': player_id,
+                'success': True,  # Questo è SUCCESS perché il player ha già riscattato
+                'message': 'Codice già riscattato precedentemente (USED)',
+                'timestamp': datetime.now().isoformat()
+            }
         elif message == "CDK NOT FOUND." and error_code == 40014:
             return {
                 'player_id': player_id,
@@ -487,6 +503,7 @@ class BulkRedeemWorker:
                 logger.info(f"🔄 Processing player {i+1}/{self.total}: {player_id}")
                 
                 # CONTROLLO: Salta se il player ha già riscattato questo codice
+                # Questo controllo DEVE venire PRIMA del cooldown
                 if self.check_already_redeemed(player_id, self.gift_code):
                     result = {
                         'player_id': player_id,
@@ -503,6 +520,7 @@ class BulkRedeemWorker:
                 
                 try:
                     # ⏰ L'autenticazione ora gestisce internamente il cooldown di 40 secondi
+                    # Solo i player che devono effettivamente riscattare arrivano qui
                     session = self.get_wos_session(player_id)
                     if not session:
                         result = {
