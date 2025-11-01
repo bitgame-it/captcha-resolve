@@ -241,30 +241,25 @@ class DiscordGiftCodeMonitor:
             return False
     
     def get_active_players_from_supabase(self):
-        """Recupera la lista di player attivi da TUTTI gli utenti Supabase"""
+        """Recupera la lista di player attivi dalle configurazioni salvate"""
         try:
-            # Cerca TUTTE le configurazioni di TUTTI gli utenti
+            # Cerca SOLO le configurazioni salvate (status = 'saved') senza gift_code
             result = self.supabase.table("bulk_redeem_requests")\
                 .select("player_list, user_id")\
+                .is_("gift_code", "null")\
+                .eq("status", "saved")\
                 .execute()
             
-            # Filtra i record che hanno gift_code null e player_list non null
-            config_records = []
-            for record in result.data:
-                if (record.get('gift_code') is None and 
-                    record.get('player_list') is not None and 
-                    len(record.get('player_list', [])) > 0):
-                    config_records.append(record)
-            
-            if config_records:
+            if result.data:
                 # Combina TUTTI i player_list di TUTTI gli utenti
                 all_player_ids = []
-                user_count = len(set(record['user_id'] for record in config_records if record.get('user_id')))
+                user_count = len(set(record['user_id'] for record in result.data if record.get('user_id')))
                 
-                for record in config_records:
-                    all_player_ids.extend(record['player_list'])
+                for record in result.data:
+                    if record.get('player_list'):
+                        all_player_ids.extend(record['player_list'])
                 
-                # Rimuovi duplicati (se lo stesso player ID è in più liste utente)
+                # Rimuovi duplicati
                 unique_player_ids = list(set(all_player_ids))
                 
                 logger.info(f"Found {len(unique_player_ids)} unique players from {user_count} users")
@@ -276,6 +271,30 @@ class DiscordGiftCodeMonitor:
         except Exception as e:
             logger.error(f"Error getting active players: {e}")
             return []
+    
+    def cleanup_old_workers(self):
+        """Pulisce i worker vecchi dal database"""
+        try:
+            # Trova worker completati con più di 1 giorno
+            one_day_ago = (datetime.now() - timedelta(days=1)).replace(tzinfo=None)
+            
+            old_workers = self.supabase.table("bulk_redeem_requests")\
+                .select("id")\
+                .lt("updated_at", one_day_ago.isoformat())\
+                .in_("status", ["completed", "failed", "stopped"])\
+                .execute()
+            
+            if old_workers.data:
+                for worker in old_workers.data:
+                    self.supabase.table("bulk_redeem_requests")\
+                        .delete()\
+                        .eq("id", worker['id'])\
+                        .execute()
+                
+                logger.info(f"🧹 Cleaned up {len(old_workers.data)} old workers")
+                
+        except Exception as e:
+            logger.error(f"Error cleaning up old workers: {e}")
     
     def start_bulk_redeem_worker(self, gift_code, player_list):
         """Avvia un worker per il riscatto bulk"""
@@ -327,7 +346,7 @@ class DiscordGiftCodeMonitor:
             for code_info in active_codes:
                 gift_code = code_info['gift_code']
                 
-                # Controlla se c'è già un worker attivo per questo codice
+                # Controlla se c'è già un worker attivo per questo codice (solo running/starting)
                 existing_worker = self.supabase.table("bulk_redeem_requests")\
                     .select("*")\
                     .eq("gift_code", gift_code)\
@@ -367,7 +386,7 @@ class DiscordGiftCodeMonitor:
     def check_and_restart_expired_workers(self):
         """Controlla e riavvia worker per codici ancora validi"""
         try:
-            # Trova worker completati ieri che hanno codici ancora validi
+            # Trova worker completati nelle ultime 24 ore che hanno codici ancora validi
             yesterday = (datetime.now() - timedelta(days=1)).replace(tzinfo=None)
             
             workers_result = self.supabase.table("bulk_redeem_requests")\
@@ -417,7 +436,10 @@ class DiscordGiftCodeMonitor:
         """Esegue il check giornaliero"""
         logger.info("Starting daily gift code check...")
         
-        # Step 0: Controlla se l'API è disponibile
+        # Step 0: Pulisci i worker vecchi
+        self.cleanup_old_workers()
+        
+        # Step 1: Controlla se l'API è disponibile
         if not self.is_api_available():
             logger.error("❌ API not available - skipping automatic redeem operations")
             
@@ -437,10 +459,10 @@ class DiscordGiftCodeMonitor:
             
             return
         
-        # Step 1: Cerca nuovi codici nel canale Discord
+        # Step 2: Cerca nuovi codici nel canale Discord
         new_codes = await self.check_channel_for_new_codes()
         
-        # Step 2: Salva nuovi codici
+        # Step 3: Salva nuovi codici
         successful_saves = 0
         for code_info in new_codes:
             if self.save_gift_code_to_db(code_info):
@@ -452,11 +474,11 @@ class DiscordGiftCodeMonitor:
         else:
             logger.info("ℹ️ No new gift codes found or all codes were already in database")
         
-        # Step 3: Avvia riscatti per TUTTI i codici attivi (solo se API è disponibile)
+        # Step 4: Avvia riscatti per TUTTI i codici attivi (solo se API è disponibile)
         logger.info("🔄 Starting automatic redeem for active codes...")
         self.start_redeem_for_active_codes()
         
-        # Step 4: Controlla e riavvia worker per codici ancora validi
+        # Step 5: Controlla e riavvia worker per codici ancora validi
         logger.info("🔄 Checking and restarting expired workers...")
         self.check_and_restart_expired_workers()
         
