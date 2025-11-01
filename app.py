@@ -285,19 +285,18 @@ class BulkRedeemWorker:
         sign = hashlib.md5((encoded_data + secret).encode()).hexdigest()
         return {**data, "sign": sign}
     
-    def solve_captcha_for_wos(self, player_id):
-        """Risolvi il captcha per un singolo giocatore WOS - VERSIONE SEMPLIFICATA"""
+    def get_wos_session(self, player_id):
+        """Ottieni una sessione WOS autenticata - COME NEL TUO NEXT.JS"""
         try:
-            timestamp = str(int(time.time() * 1000))
+            timestamp = str(int(time.time()))
             data_to_encode = {
                 "fid": player_id,
-                "time": timestamp,
-                "init": "0"
+                "time": timestamp
             }
             
             encoded_data = self.encode_wos_data(data_to_encode)
             
-            # HEADERS SEMPLIFICATI - COME NEL TUO BOT
+            # HEADERS SEMPLIFICATI - COME NEL TUO NEXT.JS
             headers = {
                 "accept": "application/json, text/plain, */*",
                 "content-type": "application/x-www-form-urlencoded",
@@ -307,15 +306,52 @@ class BulkRedeemWorker:
             session = requests.Session()
             session.headers.update(headers)
             
+            # Crea il body come stringa form-urlencoded - COME NEL TUO NEXT.JS
+            body_params = "&".join([f"{key}={value}" for key, value in encoded_data.items()])
+            
+            logger.info(f"🔄 Authenticating player {player_id} with WOS API...")
+            response = session.post(
+                "https://wos-giftcode-api.centurygame.com/api/player",
+                data=body_params,
+                timeout=30
+            )
+            
+            logger.info(f"📡 Auth API response status: {response.status_code}")
+            auth_data = response.json()
+            logger.info(f"📦 Auth API response: {auth_data}")
+            
+            if auth_data.get("msg") == "success":
+                logger.info(f"✅ Player {player_id} authenticated successfully")
+                return session
+            else:
+                logger.error(f"❌ Failed to authenticate player {player_id}: {auth_data.get('msg')}")
+                return None
+                
+        except Exception as e:
+            logger.error(f"❌ Error authenticating player {player_id}: {e}")
+            return None
+
+    def solve_captcha_for_wos(self, player_id, session):
+        """Risolvi il captcha usando una sessione autenticata"""
+        try:
+            timestamp = str(int(time.time() * 1000))
+            data_to_encode = {
+                "fid": player_id,
+                "time": timestamp,
+                "init": "0"
+            }
+            
+            encoded_data = self.encode_wos_data(data_to_encode)
+            body_params = "&".join([f"{key}={value}" for key, value in encoded_data.items()])
+            
             logger.info("🔄 Requesting captcha from WOS API...")
             response = session.post(
                 "https://wos-giftcode-api.centurygame.com/api/captcha",
-                data=encoded_data,
+                data=body_params,
                 timeout=30
             )
             
             logger.info(f"📡 Captcha API response status: {response.status_code}")
-            
             captcha_data = response.json()
             logger.info(f"📦 Captcha API response: {captcha_data}")
             
@@ -337,10 +373,10 @@ class BulkRedeemWorker:
             captcha_code, _ = generate_fallback_captcha()
             return captcha_code
 
-    def redeem_gift_code_for_player(self, player_id, captcha_code):
-        """Riscatta il codice regalo per un singolo giocatore - VERSIONE SEMPLIFICATA"""
+    def redeem_gift_code_for_player(self, player_id, session, captcha_code):
+        """Riscatta il codice regalo usando una sessione autenticata"""
         try:
-            timestamp = str(int(time.time() * 1000))
+            timestamp = str(int(time.time()))
             redeem_data = {
                 "fid": player_id,
                 "cdk": self.gift_code,
@@ -349,21 +385,12 @@ class BulkRedeemWorker:
             }
             
             encoded_redeem_data = self.encode_wos_data(redeem_data)
-            
-            # HEADERS SEMPLIFICATI - COME NEL TUO BOT
-            headers = {
-                "accept": "application/json, text/plain, */*",
-                "content-type": "application/x-www-form-urlencoded",
-                "origin": "https://wos-giftcode.centurygame.com",
-            }
-            
-            session = requests.Session()
-            session.headers.update(headers)
+            body_params = "&".join([f"{key}={value}" for key, value in encoded_redeem_data.items()])
             
             logger.info("🔄 Sending redeem request...")
             response = session.post(
                 "https://wos-giftcode-api.centurygame.com/api/gift_code",
-                data=encoded_redeem_data,
+                data=body_params,
                 timeout=30
             )
             
@@ -460,7 +487,7 @@ class BulkRedeemWorker:
             logger.error(f"Error updating Supabase progress: {e}")
     
     def run(self):
-        """Esegue il worker per il riscatto bulk - VERSIONE SEMPLIFICATA"""
+        """Esegue il worker per il riscatto bulk - VERSIONE CORRETTA"""
         self.status = "running"
         self.start_time = datetime.now()
         active_workers[self.worker_id] = self
@@ -488,11 +515,25 @@ class BulkRedeemWorker:
                 logger.info(f"🔄 Processing player {i+1}/{self.total}: {player_id}")
                 
                 try:
-                    # Step 1: Risolvi il captcha
-                    captcha_code = self.solve_captcha_for_wos(player_id)
+                    # Step 1: Ottieni sessione autenticata (COME NEL TUO NEXT.JS)
+                    session = self.get_wos_session(player_id)
+                    if not session:
+                        result = {
+                            'player_id': player_id,
+                            'success': False,
+                            'error': 'Failed to authenticate with WOS API',
+                            'timestamp': datetime.now().isoformat()
+                        }
+                        self.results.append(result)
+                        self.progress = i + 1
+                        self.update_supabase_progress()
+                        continue
                     
-                    # Step 2: Riscatta il codice regalo
-                    result = self.redeem_gift_code_for_player(player_id, captcha_code)
+                    # Step 2: Risolvi il captcha con la sessione autenticata
+                    captcha_code = self.solve_captcha_for_wos(player_id, session)
+                    
+                    # Step 3: Riscatta il codice regalo con la sessione autenticata
+                    result = self.redeem_gift_code_for_player(player_id, session, captcha_code)
                     
                 except Exception as e:
                     logger.error(f"❌ Error processing player {player_id}: {e}")
