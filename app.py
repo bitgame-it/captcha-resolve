@@ -26,21 +26,22 @@ CORS(app, origins=["*"])
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# Configurazione Supabase
-SUPABASE_URL = os.environ.get("https://kbhudpuhoxxvzxftfgnv.supabase.co")
-SUPABASE_KEY = os.environ.get("eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImtiaHVkcHVob3h4dnp4ZnRmZ252Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3NTc0NTA4OTksImV4cCI6MjA3MzAyNjg5OX0.SCLIcTZT3GEO4a02mwd6sYB1ADwp0RJFFt9PwlJWwo8")
+# Configurazione Supabase - CORRETTO
+SUPABASE_URL = os.environ.get("SUPABASE_URL", "")
+SUPABASE_KEY = os.environ.get("SUPABASE_KEY", "")
 
 # Import condizionale di Supabase
-try:
-    from supabase import create_client
-    supabase_client = create_client(SUPABASE_URL, SUPABASE_KEY)
-    logger.info("✅ Supabase client initialized successfully")
-except ImportError:
-    logger.warning("❌ Supabase not available - running in limited mode")
-    supabase_client = None
-except Exception as e:
-    logger.warning(f"❌ Supabase initialization failed: {e}")
-    supabase_client = None
+supabase_client = None
+if SUPABASE_URL and SUPABASE_KEY:
+    try:
+        from supabase import create_client
+        supabase_client = create_client(SUPABASE_URL, SUPABASE_KEY)
+        logger.info("✅ Supabase client initialized successfully")
+    except Exception as e:
+        logger.warning(f"❌ Supabase initialization failed: {e}")
+        supabase_client = None
+else:
+    logger.warning("❌ Supabase credentials not provided - running in limited mode")
 
 # Variabili globali per i worker
 worker_queue = queue.Queue()
@@ -403,14 +404,21 @@ class BulkRedeemWorker:
     def update_supabase_progress(self):
         """Aggiorna il progresso nel database Supabase"""
         if not supabase_client:
+            # Log solo ogni 10 progressi per non inondare i log
+            if self.progress % 10 == 0 or self.progress == self.total:
+                logger.info(f"📊 Progress: {self.progress}/{self.total} (Supabase not available)")
             return
             
         try:
-            supabase_client.table("bulk_redeem_requests").update({
+            result = supabase_client.table("bulk_redeem_requests").update({
                 "progress_current": self.progress,
                 "progress_total": self.total,
                 "updated_at": datetime.now().isoformat()
             }).eq("id", self.record_id).execute()
+            
+            if hasattr(result, 'error') and result.error:
+                logger.error(f"Supabase update error: {result.error}")
+                
         except Exception as e:
             logger.error(f"Error updating Supabase progress: {e}")
     
@@ -421,19 +429,26 @@ class BulkRedeemWorker:
         active_workers[self.worker_id] = self
         
         try:
-            # Aggiorna Supabase all'inizio
+            # Aggiorna Supabase all'inizio (se disponibile)
             if supabase_client:
-                supabase_client.table("bulk_redeem_requests").update({
-                    "status": "running",
-                    "started_at": self.start_time.isoformat(),
-                    "worker_id": self.worker_id,
-                    "updated_at": self.start_time.isoformat()
-                }).eq("id", self.record_id).execute()
+                try:
+                    supabase_client.table("bulk_redeem_requests").update({
+                        "status": "running",
+                        "started_at": self.start_time.isoformat(),
+                        "worker_id": self.worker_id,
+                        "updated_at": self.start_time.isoformat()
+                    }).eq("id", self.record_id).execute()
+                    logger.info(f"✅ Updated Supabase record {self.record_id} to running")
+                except Exception as e:
+                    logger.error(f"❌ Failed to update Supabase record: {e}")
             
             # Processa ogni giocatore
             for i, player_id in enumerate(self.player_list):
                 if self.status == "stopped":
+                    logger.info(f"🛑 Worker {self.worker_id} stopped by user")
                     break
+                
+                logger.info(f"🔄 Processing player {i+1}/{self.total}: {player_id}")
                 
                 # Processa il giocatore
                 result = self.redeem_gift_code_for_player(player_id)
@@ -443,23 +458,30 @@ class BulkRedeemWorker:
                 # Aggiorna il progresso nel database
                 self.update_supabase_progress()
                 
+                success_status = "✅" if result.get('success') else "❌"
+                logger.info(f"{success_status} Player {player_id} processed: {result.get('message', result.get('error', 'Unknown'))}")
+                
                 # Piccola pausa per non sovraccaricare le API
                 time.sleep(2)
             
             # Determina lo stato finale
             if self.status == "stopped":
                 final_status = "stopped"
+                logger.info(f"🛑 Worker {self.worker_id} completed as stopped")
             else:
                 final_status = "completed"
                 self.status = "completed"
+                successful = len([r for r in self.results if r.get('success', False)])
+                logger.info(f"✅ Worker {self.worker_id} completed: {successful}/{self.total} successful")
             
         except Exception as e:
-            logger.error(f"Error in bulk redeem worker: {e}")
+            logger.error(f"❌ Error in bulk redeem worker {self.worker_id}: {e}")
             self.status = "failed"
             final_status = "failed"
             
         finally:
             self.end_time = datetime.now()
+            duration = (self.end_time - self.start_time).total_seconds() if self.start_time else 0
             
             # Salva i risultati finali
             worker_results[self.worker_id] = {
@@ -471,21 +493,24 @@ class BulkRedeemWorker:
                     'failed': len([r for r in self.results if not r.get('success', True)])
                 },
                 'start_time': self.start_time.isoformat() if self.start_time else None,
-                'end_time': self.end_time.isoformat() if self.end_time else None
+                'end_time': self.end_time.isoformat() if self.end_time else None,
+                'duration_seconds': duration
             }
             
-            # Aggiorna Supabase con lo stato finale
+            # Aggiorna Supabase con lo stato finale (se disponibile)
             if supabase_client:
                 try:
                     supabase_client.table("bulk_redeem_requests").update({
                         "status": final_status,
                         "updated_at": self.end_time.isoformat()
                     }).eq("id", self.record_id).execute()
+                    logger.info(f"✅ Updated Supabase record {self.record_id} to {final_status}")
                 except Exception as e:
-                    logger.error(f"Error updating final status in Supabase: {e}")
+                    logger.error(f"❌ Failed to update final status in Supabase: {e}")
             
             # Rimuovi dai worker attivi
             active_workers.pop(self.worker_id, None)
+            logger.info(f"🗑️ Worker {self.worker_id} removed from active workers")
 
 def worker_manager():
     """Gestisce i worker in background"""
@@ -599,12 +624,12 @@ def start_bulk_redeem():
     try:
         data = request.get_json()
         
-        if not data or 'players' not in data or 'gift_code' not in data or 'record_id' not in data:
-            return jsonify({'error': 'Missing required fields'}), 400
+        if not data or 'players' not in data or 'gift_code' not in data:
+            return jsonify({'error': 'Missing required fields: players and gift_code'}), 400
         
         player_list = data['players']
         gift_code = data['gift_code']
-        record_id = data['record_id']
+        record_id = data.get('record_id', str(uuid.uuid4()))  # Fallback se non fornito
         
         # Validazione
         if not isinstance(player_list, list) or len(player_list) == 0:
@@ -620,15 +645,19 @@ def start_bulk_redeem():
         # Aggiungi alla coda
         worker_queue.put(worker)
         
+        logger.info(f"🚀 Started bulk redeem worker {worker_id} for {len(player_list)} players")
+        
         return jsonify({
             'success': True,
             'worker_id': worker_id,
+            'record_id': record_id,
             'total_players': len(player_list),
+            'supabase_available': supabase_client is not None,
             'message': f'Started processing {len(player_list)} players'
         })
         
     except Exception as e:
-        logger.error(f"Error starting bulk redeem: {e}")
+        logger.error(f"❌ Error starting bulk redeem: {e}")
         return jsonify({'error': str(e)}), 500
 
 @app.route('/api/worker-status/<worker_id>', methods=['GET'])
@@ -712,13 +741,23 @@ def get_active_workers():
 def health_check():
     """Endpoint per health check"""
     model_status = model_session is not None
+    supabase_status = supabase_client is not None
+    
+    health_status = "healthy"
+    if not model_status:
+        health_status = "degraded"
+    if not supabase_status:
+        health_status = "degraded"
+    
     return jsonify({
-        'status': 'healthy',
+        'status': health_status,
         'message': 'Captcha solver service is running',
         'model_loaded': model_status,
         'model_ready': model_status and model_metadata is not None,
+        'supabase_connected': supabase_status,
         'active_workers': len(active_workers),
-        'supabase_connected': supabase_client is not None
+        'worker_queue_size': worker_queue.qsize(),
+        'timestamp': datetime.now().isoformat()
     })
 
 @app.route('/')
@@ -728,7 +767,8 @@ def home():
         'status': 'online',
         'model_loaded': model_session is not None,
         'model_ready': model_session is not None and model_metadata is not None,
-        'bulk_redeem_supported': True
+        'bulk_redeem_supported': True,
+        'supabase_available': supabase_client is not None
     })
 
 if __name__ == '__main__':
