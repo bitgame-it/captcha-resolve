@@ -318,33 +318,6 @@ class DiscordGiftCodeMonitor:
         except Exception as e:
             logger.error(f"Error starting redeem for active codes: {e}")
     
-    async def daily_check(self):
-        """Esegue il check giornaliero"""
-        logger.info("Starting daily gift code check...")
-        
-        # Step 1: Cerca nuovi codici nel canale Discord
-        new_codes = await self.check_channel_for_new_codes()
-        
-        # Step 2: Salva nuovi codici
-        successful_saves = 0
-        for code_info in new_codes:
-            if self.save_gift_code_to_db(code_info):
-                successful_saves += 1
-                logger.info(f"✅ Saved new gift code: {code_info['gift_code']}")
-        
-        if successful_saves > 0:
-            logger.info(f"✅ Saved {successful_saves} new gift codes")
-        else:
-            logger.info("ℹ️ No new gift codes found or all codes were already in database")
-        
-        # Step 3: Avvia riscatti per TUTTI i codici attivi (nuovi e esistenti)
-        self.start_redeem_for_active_codes()
-        
-        # Step 4: Controlla e riavvia worker per codici ancora validi
-        self.check_and_restart_expired_workers()
-        
-        logger.info("Daily check completed")
-    
     def check_and_restart_expired_workers(self):
         """Controlla e riavvia worker per codici ancora validi"""
         try:
@@ -393,6 +366,33 @@ class DiscordGiftCodeMonitor:
             
         except Exception as e:
             logger.error(f"Error checking expired workers: {e}")
+    
+    async def daily_check(self):
+        """Esegue il check giornaliero"""
+        logger.info("Starting daily gift code check...")
+        
+        # Step 1: Cerca nuovi codici nel canale Discord
+        new_codes = await self.check_channel_for_new_codes()
+        
+        # Step 2: Salva nuovi codici
+        successful_saves = 0
+        for code_info in new_codes:
+            if self.save_gift_code_to_db(code_info):
+                successful_saves += 1
+                logger.info(f"✅ Saved new gift code: {code_info['gift_code']}")
+        
+        if successful_saves > 0:
+            logger.info(f"✅ Saved {successful_saves} new gift codes")
+        else:
+            logger.info("ℹ️ No new gift codes found or all codes were already in database")
+        
+        # Step 3: Avvia riscatti per TUTTI i codici attivi (nuovi e esistenti)
+        self.start_redeem_for_active_codes()
+        
+        # Step 4: Controlla e riavvia worker per codici ancora validi
+        self.check_and_restart_expired_workers()
+        
+        logger.info("Daily check completed")
     
     async def start_monitoring(self):
         """Avvia il monitoraggio"""
