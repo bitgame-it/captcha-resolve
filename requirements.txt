@@ -1,7 +1,10 @@
 flask==2.3.3
 flask-cors==4.0.0
-onnxruntime==1.18.1  # ⬅️ USA LA STESSA VERSIONE DEL TUO BOT
-Pillow==10.4.0       # ⬅️ Aggiorna anche Pillow
-numpy==1.26.4        # ⬅️ Aggiorna anche numpy
+onnxruntime==1.18.1
+Pillow==10.4.0
+numpy==1.26.4
 gunicorn==21.2.0
-protobuf==3.20.3     # ⬅️ Aggiungi per compatibilità
+protobuf==3.20.3
+requests==2.31.0
+supabase==2.3.0
+python-dotenv==1.0.0
