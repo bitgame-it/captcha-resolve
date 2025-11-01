@@ -5,6 +5,7 @@ from threading import Thread
 import time
 import logging
 import requests
+import asyncio
 
 # Configura logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -53,6 +54,24 @@ def run_discord_bot():
     except Exception as e:
         logger.error(f"Error starting Discord bot: {e}")
 
+async def run_wiki_scraper():
+    """Avvia lo scraper wiki"""
+    try:
+        logger.info("🌐 Starting Wiki Scraper...")
+        from wiki_scraper import run_wiki_scraper_periodically
+        await run_wiki_scraper_periodically()
+    except Exception as e:
+        logger.error(f"Error starting wiki scraper: {e}")
+
+def start_wiki_scraper_thread():
+    """Avvia lo scraper wiki in un thread asyncio"""
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+    try:
+        loop.run_until_complete(run_wiki_scraper())
+    finally:
+        loop.close()
+
 if __name__ == "__main__":
     logger.info("🎯 Starting all services...")
     
@@ -71,11 +90,26 @@ if __name__ == "__main__":
     api_ready = wait_for_api(railway_port, max_retries=12, retry_delay=5)
     
     if api_ready:
-        # Avvia Discord bot nel thread principale
-        logger.info("✅ Starting Discord monitor...")
-        run_discord_bot()
+        # Avvia Discord bot in un thread
+        discord_thread = Thread(target=run_discord_bot)
+        discord_thread.daemon = True
+        discord_thread.start()
+        logger.info("✅ Discord bot started in background...")
+        
+        # Avvia Wiki scraper in un thread
+        wiki_thread = Thread(target=start_wiki_scraper_thread)
+        wiki_thread.daemon = True
+        wiki_thread.start()
+        logger.info("✅ Wiki scraper started in background...")
+        
+        # Mantieni il processo principale attivo
+        try:
+            while True:
+                time.sleep(60)
+        except KeyboardInterrupt:
+            logger.info("👋 Shutting down...")
     else:
-        logger.error("❌ Failed to start Discord bot - API not ready")
+        logger.error("❌ Failed to start services - API not ready")
         logger.info("💡 Continuing with Flask API only...")
         
         # Mantieni il processo in esecuzione per Flask
