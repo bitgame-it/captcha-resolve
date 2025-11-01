@@ -6,6 +6,7 @@ import requests
 import hashlib
 import os
 import logging
+import time
 from supabase import create_client
 
 # Configura logging
@@ -260,6 +261,7 @@ class DiscordGiftCodeMonitor:
                 "record_id": f"{gift_code}_{int(datetime.now().timestamp())}"
             }
             
+            logger.info(f"🔄 Sending request to backend: {url}")
             response = requests.post(url, json=payload, timeout=30)
             
             if response.status_code == 200:
@@ -267,7 +269,7 @@ class DiscordGiftCodeMonitor:
                 logger.info(f"Started bulk redeem worker for code {gift_code}: {result}")
                 return result
             else:
-                logger.error(f"Failed to start bulk redeem worker: {response.text}")
+                logger.error(f"Failed to start bulk redeem worker: {response.status_code} - {response.text}")
                 return None
                 
         except Exception as e:
@@ -435,6 +437,8 @@ def main():
     if not all([DISCORD_TOKEN, DISCORD_CHANNEL_ID, SUPABASE_URL, SUPABASE_KEY]):
         logger.error("Missing required environment variables")
         return
+    
+    logger.info(f"🔧 Configuration: API_BASE_URL={API_BASE_URL}")
     
     # Crea e avvia il monitor
     monitor = DiscordGiftCodeMonitor(
