@@ -27,38 +27,27 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 # Configurazione Supabase - CORREGGI QUESTA PARTE
+from supabase import create_client, Client
+
 SUPABASE_URL = os.environ.get("SUPABASE_URL", "")
 SUPABASE_KEY = os.environ.get("SUPABASE_KEY", "")
 
-# Import condizionale di Supabase con gestione errori migliorata
 supabase_client = None
+
 if SUPABASE_URL and SUPABASE_KEY:
     try:
-        from supabase import create_client, Client
-        
-        # Inizializzazione semplice senza parametri extra
-        supabase_client = create_client(SUPABASE_URL, SUPABASE_KEY)
+        supabase_client: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
         logger.info("✅ Supabase client initialized successfully")
-        
-        # Test della connessione
+
+        # Test di connessione
         try:
-            # Prova una query semplice per verificare la connessione
-            result = supabase_client.table("bulk_redeem_requests").select("count", count="exact").limit(1).execute()
+            result = supabase_client.table("bulk_redeem_requests").select("*").limit(1).execute()
             logger.info("✅ Supabase connection test successful")
         except Exception as test_error:
             logger.warning(f"⚠️ Supabase connection test failed: {test_error}")
-            
-    except ImportError:
-        logger.warning("❌ Supabase library not available")
+
     except Exception as e:
         logger.warning(f"❌ Supabase initialization failed: {e}")
-        # Tentativo alternativo con inizializzazione più semplice
-        try:
-            import supabase
-            supabase_client = supabase.create_client(SUPABASE_URL, SUPABASE_KEY)
-            logger.info("✅ Supabase client initialized with alternative method")
-        except Exception as alt_error:
-            logger.warning(f"❌ Alternative Supabase initialization also failed: {alt_error}")
 else:
     logger.warning("❌ Supabase credentials not provided - running in limited mode")
     
