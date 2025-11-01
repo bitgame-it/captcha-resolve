@@ -276,56 +276,17 @@ class BulkRedeemWorker:
         self.results = []
         self.start_time = None
         self.end_time = None
-        self.current_session = None
     
     def encode_wos_data(self, data):
-        """Encoding per le richieste WOS API"""
+        """Encoding per le richieste WOS API - STESSO DEL TUO BOT"""
         secret = "tB87#kPtkxqOS2"
         sorted_keys = sorted(data.keys())
         encoded_data = "&".join([f"{key}={data[key]}" for key in sorted_keys])
         sign = hashlib.md5((encoded_data + secret).encode()).hexdigest()
         return {**data, "sign": sign}
     
-    def create_wos_session(self):
-        """Crea una sessione WOS con gli header corretti"""
-        session = requests.Session()
-        
-        headers = {
-            "Accept": "application/json, text/plain, */*",
-            "Accept-Encoding": "gzip, deflate, br",
-            "Accept-Language": "it-IT,it;q=0.9,en;q=0.8",
-            "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8",
-            "Origin": "https://wos-giftcode.centurygame.com",
-            "Referer": "https://wos-giftcode.centurygame.com/",
-            "Sec-Ch-Ua": '"Not_A Brand";v="8", "Chromium";v="120", "Google Chrome";v="120"',
-            "Sec-Ch-Ua-Mobile": "?0",
-            "Sec-Ch-Ua-Platform": '"Windows"',
-            "Sec-Fetch-Dest": "empty",
-            "Sec-Fetch-Mode": "cors",
-            "Sec-Fetch-Site": "same-site",
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-            "X-Requested-With": "XMLHttpRequest"
-        }
-        
-        session.headers.update(headers)
-        return session
-    
-    def initialize_wos_session(self, session):
-        """Inizializza la sessione WOS con una richiesta GET"""
-        try:
-            logger.info("🔄 Initializing WOS session...")
-            init_response = session.get(
-                "https://wos-giftcode.centurygame.com/", 
-                timeout=15
-            )
-            logger.info(f"✅ Session init status: {init_response.status_code}")
-            return True
-        except Exception as e:
-            logger.warning(f"⚠️ Session init warning: {e}")
-            return False
-    
     def solve_captcha_for_wos(self, player_id):
-        """Risolvi il captcha per un singolo giocatore WOS - VERSIONE CORRETTA"""
+        """Risolvi il captcha per un singolo giocatore WOS - VERSIONE SEMPLIFICATA"""
         try:
             timestamp = str(int(time.time() * 1000))
             data_to_encode = {
@@ -336,14 +297,18 @@ class BulkRedeemWorker:
             
             encoded_data = self.encode_wos_data(data_to_encode)
             
-            # Crea una nuova sessione per ogni giocatore
-            self.current_session = self.create_wos_session()
+            # HEADERS SEMPLIFICATI - COME NEL TUO BOT
+            headers = {
+                "accept": "application/json, text/plain, */*",
+                "content-type": "application/x-www-form-urlencoded",
+                "origin": "https://wos-giftcode.centurygame.com",
+            }
             
-            # Inizializza la sessione
-            self.initialize_wos_session(self.current_session)
+            session = requests.Session()
+            session.headers.update(headers)
             
             logger.info("🔄 Requesting captcha from WOS API...")
-            response = self.current_session.post(
+            response = session.post(
                 "https://wos-giftcode-api.centurygame.com/api/captcha",
                 data=encoded_data,
                 timeout=30
@@ -373,7 +338,7 @@ class BulkRedeemWorker:
             return captcha_code
 
     def redeem_gift_code_for_player(self, player_id, captcha_code):
-        """Riscatta il codice regalo per un singolo giocatore - VERSIONE CORRETTA"""
+        """Riscatta il codice regalo per un singolo giocatore - VERSIONE SEMPLIFICATA"""
         try:
             timestamp = str(int(time.time() * 1000))
             redeem_data = {
@@ -385,15 +350,17 @@ class BulkRedeemWorker:
             
             encoded_redeem_data = self.encode_wos_data(redeem_data)
             
+            # HEADERS SEMPLIFICATI - COME NEL TUO BOT
+            headers = {
+                "accept": "application/json, text/plain, */*",
+                "content-type": "application/x-www-form-urlencoded",
+                "origin": "https://wos-giftcode.centurygame.com",
+            }
+            
+            session = requests.Session()
+            session.headers.update(headers)
+            
             logger.info("🔄 Sending redeem request...")
-            
-            # Usa la sessione esistente dal captcha
-            if self.current_session:
-                session = self.current_session
-            else:
-                session = self.create_wos_session()
-                self.initialize_wos_session(session)
-            
             response = session.post(
                 "https://wos-giftcode-api.centurygame.com/api/gift_code",
                 data=encoded_redeem_data,
@@ -404,16 +371,11 @@ class BulkRedeemWorker:
             result_data = response.json()
             logger.info(f"📦 Redeem API response: {result_data}")
             
-            # Pulisci la sessione dopo il redeem
-            self.current_session = None
-            
             # Interpreta il risultato
             return self.interpret_redeem_result(player_id, result_data, captcha_code)
             
         except Exception as e:
             logger.error(f"❌ Error redeeming gift code for player {player_id}: {e}")
-            # Pulisci la sessione in caso di errore
-            self.current_session = None
             return {
                 'player_id': player_id,
                 'success': False,
@@ -498,7 +460,7 @@ class BulkRedeemWorker:
             logger.error(f"Error updating Supabase progress: {e}")
     
     def run(self):
-        """Esegue il worker per il riscatto bulk - VERSIONE CORRETTA"""
+        """Esegue il worker per il riscatto bulk - VERSIONE SEMPLIFICATA"""
         self.status = "running"
         self.start_time = datetime.now()
         active_workers[self.worker_id] = self
@@ -550,8 +512,8 @@ class BulkRedeemWorker:
                 success_status = "✅" if result.get('success') else "❌"
                 logger.info(f"{success_status} Player {player_id} processed: {result.get('message', result.get('error', 'Unknown'))}")
                 
-                # Pausa più lunga tra le richieste per evitare rate limiting
-                time.sleep(3)
+                # Pausa tra le richieste
+                time.sleep(2)
             
             # Determina lo stato finale
             if self.status == "stopped":
