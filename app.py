@@ -1,302 +1,89 @@
-from flask import Flask, request, jsonify
-from flask_cors import CORS
-import base64
-import numpy as np
-import onnxruntime as ort
-import json
-from PIL import Image
-import io
-import os
-import logging
-import threading
-import time
-import queue
-import uuid
-from datetime import datetime
+import discord
+import asyncio
+import re
+from datetime import datetime, timedelta
+import sqlite3
 import requests
 import hashlib
-import random
-
-app = Flask(__name__)
-
-# Configura CORS
-CORS(app, origins=["*"])
+import json
+from supabase import create_client
+import os
+import logging
 
 # Configura logging
-logging.basicConfig(level=logging.INFO)
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
-# Configurazione Supabase
-from supabase import create_client, Client
-
-SUPABASE_URL = os.environ.get("SUPABASE_URL", "")
-SUPABASE_KEY = os.environ.get("SUPABASE_KEY", "")
-
-supabase_client = None
-
-if SUPABASE_URL and SUPABASE_KEY:
-    try:
-        supabase_client: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
-        logger.info("✅ Supabase client initialized successfully")
-
-        # Test di connessione
+class DiscordGiftCodeMonitor:
+    def __init__(self, discord_token, channel_id, supabase_url, supabase_key, api_base_url):
+        self.discord_token = discord_token
+        self.channel_id = channel_id
+        self.supabase_url = supabase_url
+        self.supabase_key = supabase_key
+        self.api_base_url = api_base_url
+        
+        # Inizializza Supabase
+        self.supabase = create_client(supabase_url, supabase_key)
+        
+        # Inizializza Discord client
+        intents = discord.Intents.default()
+        intents.message_content = True
+        self.client = discord.Client(intents=intents)
+        
+        # Pattern per estrarre codice e data
+        self.code_pattern = r"Code:\s*([A-Za-z0-9]+)"
+        self.date_pattern = r"Valid Until:\s*([A-Za-z]+ \d{1,2}, \d{1,2}:\d{2}) \(UTC\+0\)"
+        
+        # Mappa mesi
+        self.month_map = {
+            'Jan': 1, 'Feb': 2, 'Mar': 3, 'Apr': 4, 'May': 5, 'Jun': 6,
+            'Jul': 7, 'Aug': 8, 'Sep': 9, 'Oct': 10, 'Nov': 11, 'Dec': 12
+        }
+    
+    def parse_date(self, date_str):
+        """Converte la stringa della data in datetime object"""
         try:
-            result = supabase_client.table("bulk_redeem_requests").select("*").limit(1).execute()
-            logger.info("✅ Supabase connection test successful")
-        except Exception as test_error:
-            logger.warning(f"⚠️ Supabase connection test failed: {test_error}")
-
-    except Exception as e:
-        logger.warning(f"❌ Supabase initialization failed: {e}")
-else:
-    logger.warning("❌ Supabase credentials not provided - running in limited mode")
-    
-# Variabili globali per i worker
-worker_queue = queue.Queue()
-active_workers = {}
-worker_results = {}
-
-def load_model():
-    """Carica il modello ONNX con la stessa configurazione del tuo bot"""
-    try:
-        logger.info("🔍 Starting model loading process...")
-        
-        model_path = "models/captcha_model.onnx"
-        metadata_path = "models/captcha_model_metadata.json"
-        
-        if not os.path.exists(model_path):
-            logger.error(f"❌ Model file not found: {model_path}")
-            logger.error(f"Current directory: {os.getcwd()}")
-            logger.error(f"Directory contents: {os.listdir('.')}")
-            if os.path.exists('models'):
-                logger.error(f"Models directory: {os.listdir('models')}")
-            return None, None
-            
-        if not os.path.exists(metadata_path):
-            logger.error(f"❌ Metadata file not found: {metadata_path}")
-            return None, None
-        
-        logger.info("🔄 Loading ONNX model...")
-        
-        try:
-            session = ort.InferenceSession(model_path)
-            logger.info("✅ ONNX model loaded successfully (no explicit providers)")
-        except Exception as e:
-            logger.warning(f"First attempt failed: {e}")
-            logger.info("🔄 Trying with explicit CPU provider...")
-            session = ort.InferenceSession(model_path, providers=['CPUExecutionProvider'])
-            logger.info("✅ ONNX model loaded successfully (with CPU provider)")
-        
-        logger.info("🔄 Loading model metadata...")
-        with open(metadata_path, 'r') as f:
-            metadata = json.load(f)
-        
-        logger.info("✅ Model metadata loaded successfully")
-        
-        # Test del modello
-        logger.info("🔄 Testing model inference...")
-        if 'input_shape' in metadata:
-            input_shape = metadata['input_shape']
-            logger.info(f"📐 Testing with input_shape: {input_shape}")
-            
-            # Determina dimensioni per il test
-            if len(input_shape) >= 3:
-                height = input_shape[-2] if len(input_shape) >= 2 else 64
-                width = input_shape[-1] if len(input_shape) >= 2 else 128
-            else:
-                height, width = 64, 128
-        else:
-            height, width = 64, 128
-            
-        dummy_input = np.random.rand(1, 1, height, width).astype(np.float32)
-        input_name = session.get_inputs()[0].name
-        outputs = session.run(None, {input_name: dummy_input})
-        logger.info(f"✅ Model test successful. Outputs: {len(outputs)}")
-        
-        return session, metadata
-        
-    except Exception as e:
-        logger.error(f"❌ Error loading model: {e}")
-        return None, None
-
-# Carica il modello
-logger.info("🚀 Starting application...")
-model_session, model_metadata = load_model()
-
-# Definisci variabili globali CON CONTROLLO DELLE DIMENSIONI
-if model_session and model_metadata:
-    logger.info("🎉 Application started successfully with model loaded!")
-    
-    char_set = model_metadata.get('chars', 'abcdefghijklmnopqrstuvwxyz0123456789')
-    idx_to_char = model_metadata.get('idx_to_char', {})
-    
-    # CONTROLLO SICURO delle dimensioni dell'input
-    if 'input_shape' in model_metadata:
-        input_shape = model_metadata['input_shape']
-        logger.info(f"📐 Raw input_shape: {input_shape}")
-        logger.info(f"📐 Input shape length: {len(input_shape)}")
-        
-        # Estrai dimensioni in modo sicuro
-        if len(input_shape) == 4:
-            # Formato: [batch, channels, height, width]
-            expected_channels = input_shape[1]
-            expected_height = input_shape[2]
-            expected_width = input_shape[3]
-        elif len(input_shape) == 3:
-            # Formato: [channels, height, width] 
-            expected_channels = input_shape[0]
-            expected_height = input_shape[1]
-            expected_width = input_shape[2]
-        elif len(input_shape) == 2:
-            # Formato: [height, width]
-            expected_channels = 1  # Assume grayscale
-            expected_height = input_shape[0]
-            expected_width = input_shape[1]
-        else:
-            # Formato sconosciuto, usa default
-            logger.warning(f"Unknown input_shape format: {input_shape}")
-            expected_channels = 1
-            expected_height = 64
-            expected_width = 128
-    else:
-        # Se non c'è input_shape nel metadata, usa valori di default
-        logger.warning("No input_shape in metadata, using defaults")
-        expected_channels = 1
-        expected_height = 64
-        expected_width = 128
-    
-    logger.info(f"📐 Model configuration: {expected_channels} channel(s), {expected_height}x{expected_width}")
-    
-else:
-    logger.error("💥 Application started WITHOUT model!")
-    char_set = 'abcdefghijklmnopqrstuvwxyz0123456789'
-    idx_to_char = {}
-    expected_channels = 1
-    expected_height = 64
-    expected_width = 128
-
-def preprocess_image(base64_string):
-    """Preprocessa l'immagine base64 - STESSA LOGICA DEL TUO BOT"""
-    try:
-        # Rimuovi l'header se presente
-        if ',' in base64_string:
-            base64_string = base64_string.split(',')[1]
-        
-        # Decodifica base64
-        image_data = base64.b64decode(base64_string)
-        image = Image.open(io.BytesIO(image_data))
-        
-        logger.info(f"Original image: {image.mode}, {image.size}")
-        
-        # Converti in grayscale come nel tuo bot
-        if image.mode != 'L':
-            image = image.convert('L')
-        
-        # Ridimensiona alle dimensioni attese dal modello
-        image = image.resize((expected_width, expected_height), Image.LANCZOS)
-        logger.info(f"Resized image: {image.mode}, {image.size}")
-        
-        # Converti in array numpy
-        image_array = np.array(image, dtype=np.float32)
-        
-        # Normalizza usando i valori del metadata (come nel tuo bot)
-        if model_metadata and 'normalization' in model_metadata:
-            mean = model_metadata['normalization']['mean'][0]
-            std = model_metadata['normalization']['std'][0]
-            image_array = (image_array / 255.0 - mean) / std
-        else:
-            # Normalizzazione di default
-            image_array = image_array / 255.0
-        
-        # Formato finale: [1, 1, height, width] - come nel tuo bot
-        image_array = np.expand_dims(image_array, axis=0)  # batch dimension
-        image_array = np.expand_dims(image_array, axis=0)  # channel dimension
-        
-        logger.info(f"Final shape for model: {image_array.shape}")
-        return image_array
-        
-    except Exception as e:
-        logger.error(f"Error preprocessing image: {str(e)}")
-        raise
-
-def predict_captcha(image_array):
-    """Esegue la predizione del captcha - STESSA LOGICA DEL TUO BOT"""
-    try:
-        if model_session is None:
-            raise ValueError("Model not loaded")
-        
-        # Get input name
-        input_name = model_session.get_inputs()[0].name
-        
-        # Esegui inference
-        outputs = model_session.run(None, {input_name: image_array})
-        
-        # Decodifica le predizioni - STESSA LOGICA DEL TUO BOT
-        predicted_text = ""
-        confidences = []
-
-        # Il tuo modello probabilmente restituisce 4 output per 4 caratteri
-        for pos in range(4):
-            if pos < len(outputs):
-                char_probs = outputs[pos][0]  # [num_chars]
-                predicted_idx = np.argmax(char_probs)
-                confidence = float(char_probs[predicted_idx])
+            # Esempio: "Oct 31, 23:59"
+            match = re.match(r"([A-Za-z]+) (\d{1,2}), (\d{1,2}:\d{2})", date_str)
+            if match:
+                month_str, day_str, time_str = match.groups()
+                month = self.month_map[month_str]
+                day = int(day_str)
                 
-                # Converti indice in carattere
-                predicted_char = idx_to_char.get(str(predicted_idx), '?')
-                predicted_text += predicted_char
-                confidences.append(confidence)
-            else:
-                predicted_text += '?'
-                confidences.append(0.0)
-
-        avg_confidence = sum(confidences) / len(confidences) if confidences else 0.0
-        
-        logger.info(f"Predicted captcha: {predicted_text} (confidence: {avg_confidence:.3f})")
-        return predicted_text, avg_confidence
-        
-    except Exception as e:
-        logger.error(f"Error in prediction: {str(e)}")
-        raise
-
-def generate_fallback_captcha():
-    """Genera un captcha casuale come fallback"""
-    chars = 'abcdefghijklmnopqrstuvwxyz0123456789'
-    return ''.join(random.choice(chars) for _ in range(4)), 0.0
-
-class BulkRedeemWorker:
-    def __init__(self, record_id, player_list, gift_code, worker_id):
-        self.worker_id = worker_id
-        self.record_id = record_id
-        self.player_list = player_list
-        self.gift_code = gift_code
-        self.status = "pending"
-        self.progress = 0
-        self.total = len(player_list)
-        self.results = []
-        self.start_time = None
-        self.end_time = None
+                # Parse time
+                hour, minute = map(int, time_str.split(':'))
+                
+                # Crea datetime (assumiamo anno corrente)
+                current_year = datetime.now().year
+                return datetime(current_year, month, day, hour, minute)
+        except Exception as e:
+            logger.error(f"Error parsing date {date_str}: {e}")
+        return None
+    
+    def is_code_expired(self, expiry_date):
+        """Controlla se il codice è scaduto"""
+        return datetime.now() > expiry_date
     
     def encode_wos_data(self, data):
-        """Encoding per le richieste WOS API - STESSO DEL TUO BOT"""
+        """Encoding per le richieste WOS API"""
         secret = "tB87#kPtkxqOS2"
         sorted_keys = sorted(data.keys())
         encoded_data = "&".join([f"{key}={data[key]}" for key in sorted_keys])
         sign = hashlib.md5((encoded_data + secret).encode()).hexdigest()
         return {**data, "sign": sign}
     
-    def get_wos_session(self, player_id):
-        """Ottieni una sessione WOS autenticata - COME NEL TUO NEXT.JS"""
+    def verify_gift_code(self, gift_code):
+        """Verifica se un codice regalo è valido"""
         try:
-            timestamp = str(int(time.time()))
-            data_to_encode = {
-                "fid": player_id,
+            timestamp = str(int(datetime.now().timestamp()))
+            test_data = {
+                "fid": "244886619",  # ID di test
+                "cdk": gift_code,
                 "time": timestamp
             }
             
-            encoded_data = self.encode_wos_data(data_to_encode)
+            encoded_data = self.encode_wos_data(test_data)
             
-            # HEADERS SEMPLIFICATI - COME NEL TUO NEXT.JS
             headers = {
                 "accept": "application/json, text/plain, */*",
                 "content-type": "application/x-www-form-urlencoded",
@@ -306,563 +93,275 @@ class BulkRedeemWorker:
             session = requests.Session()
             session.headers.update(headers)
             
-            # Crea il body come stringa form-urlencoded - COME NEL TUO NEXT.JS
             body_params = "&".join([f"{key}={value}" for key, value in encoded_data.items()])
             
-            logger.info(f"🔄 Authenticating player {player_id} with WOS API...")
-            response = session.post(
-                "https://wos-giftcode-api.centurygame.com/api/player",
-                data=body_params,
-                timeout=30
-            )
-            
-            logger.info(f"📡 Auth API response status: {response.status_code}")
-            auth_data = response.json()
-            logger.info(f"📦 Auth API response: {auth_data}")
-            
-            if auth_data.get("msg") == "success":
-                logger.info(f"✅ Player {player_id} authenticated successfully")
-                return session
-            else:
-                logger.error(f"❌ Failed to authenticate player {player_id}: {auth_data.get('msg')}")
-                return None
-                
-        except Exception as e:
-            logger.error(f"❌ Error authenticating player {player_id}: {e}")
-            return None
-
-    def solve_captcha_for_wos(self, player_id, session):
-        """Risolvi il captcha usando una sessione autenticata"""
-        try:
-            timestamp = str(int(time.time() * 1000))
-            data_to_encode = {
-                "fid": player_id,
-                "time": timestamp,
-                "init": "0"
-            }
-            
-            encoded_data = self.encode_wos_data(data_to_encode)
-            body_params = "&".join([f"{key}={value}" for key, value in encoded_data.items()])
-            
-            logger.info("🔄 Requesting captcha from WOS API...")
-            response = session.post(
-                "https://wos-giftcode-api.centurygame.com/api/captcha",
-                data=body_params,
-                timeout=30
-            )
-            
-            logger.info(f"📡 Captcha API response status: {response.status_code}")
-            captcha_data = response.json()
-            logger.info(f"📦 Captcha API response: {captcha_data}")
-            
-            if captcha_data.get("msg") == "SUCCESS" and captcha_data.get("data", {}).get("img"):
-                base64_image = captcha_data["data"]["img"]
-                
-                # Risolvi il captcha
-                captcha_code, confidence = solve_captcha_internal(base64_image)
-                logger.info(f"🎯 Solved captcha for player {player_id}: {captcha_code} (confidence: {confidence:.3f})")
-                return captcha_code
-            else:
-                error_msg = captcha_data.get('msg', 'Unknown error')
-                logger.error(f"❌ Failed to load captcha: {error_msg}")
-                raise Exception(f"Failed to load captcha: {error_msg}")
-            
-        except Exception as e:
-            logger.error(f"❌ Error in captcha process for player {player_id}: {e}")
-            # Fallback con captcha casuale
-            captcha_code, _ = generate_fallback_captcha()
-            return captcha_code
-
-    def redeem_gift_code_for_player(self, player_id, session, captcha_code):
-        """Riscatta il codice regalo usando una sessione autenticata"""
-        try:
-            timestamp = str(int(time.time()))
-            redeem_data = {
-                "fid": player_id,
-                "cdk": self.gift_code,
-                "captcha_code": captcha_code,
-                "time": timestamp
-            }
-            
-            encoded_redeem_data = self.encode_wos_data(redeem_data)
-            body_params = "&".join([f"{key}={value}" for key, value in encoded_redeem_data.items()])
-            
-            logger.info("🔄 Sending redeem request...")
             response = session.post(
                 "https://wos-giftcode-api.centurygame.com/api/gift_code",
                 data=body_params,
                 timeout=30
             )
             
-            logger.info(f"📡 Redeem API response status: {response.status_code}")
             result_data = response.json()
-            logger.info(f"📦 Redeem API response: {result_data}")
+            logger.info(f"Code verification result for {gift_code}: {result_data}")
             
-            # Interpreta il risultato
-            return self.interpret_redeem_result(player_id, result_data, captcha_code)
-            
-        except Exception as e:
-            logger.error(f"❌ Error redeeming gift code for player {player_id}: {e}")
-            return {
-                'player_id': player_id,
-                'success': False,
-                'error': str(e),
-                'timestamp': datetime.now().isoformat()
-            }
-    
-    def interpret_redeem_result(self, player_id, result_data, captcha_code):
-        """Interpreta la risposta del redeem"""
-        message = result_data.get("msg", "")
-        error_code = result_data.get("err_code")
-        
-        if message == "SUCCESS":
-            return {
-                'player_id': player_id,
-                'success': True,
-                'message': 'Codice riscattato con successo',
-                'timestamp': datetime.now().isoformat()
-            }
-        elif message == "RECEIVED." and error_code == 40008:
-            return {
-                'player_id': player_id,
-                'success': True, 
-                'message': 'Codice già riscattato precedentemente',
-                'timestamp': datetime.now().isoformat()
-            }
-        elif message == "CDK NOT FOUND." and error_code == 40014:
-            return {
-                'player_id': player_id,
-                'success': False,
-                'error': 'Codice regalo non valido',
-                'timestamp': datetime.now().isoformat()
-            }
-        elif message == "TIME ERROR." and error_code == 40007:
-            return {
-                'player_id': player_id,
-                'success': False,
-                'error': 'Codice regalo scaduto',
-                'timestamp': datetime.now().isoformat()
-            }
-        elif message == "CAPTCHA ERROR.":
-            return {
-                'player_id': player_id,
-                'success': False,
-                'error': f'Errore captcha (soluzione provata: {captcha_code})',
-                'timestamp': datetime.now().isoformat()
-            }
-        elif message == "NOT LOGIN.":
-            return {
-                'player_id': player_id,
-                'success': False,
-                'error': 'Errore autenticazione: sessione non valida',
-                'timestamp': datetime.now().isoformat()
-            }
-        else:
-            return {
-                'player_id': player_id,
-                'success': False,
-                'error': f"{message} (code: {error_code})",
-                'timestamp': datetime.now().isoformat()
-            }
-    
-    def update_supabase_progress(self):
-        """Aggiorna il progresso nel database Supabase"""
-        if not supabase_client:
-            # Log solo ogni 10 progressi per non inondare i log
-            if self.progress % 10 == 0 or self.progress == self.total:
-                logger.info(f"📊 Progress: {self.progress}/{self.total} (Supabase not available)")
-            return
-            
-        try:
-            result = supabase_client.table("bulk_redeem_requests").update({
-                "progress_current": self.progress,
-                "progress_total": self.total,
-                "updated_at": datetime.now().isoformat()
-            }).eq("id", self.record_id).execute()
-            
-            if hasattr(result, 'error') and result.error:
-                logger.error(f"Supabase update error: {result.error}")
+            # Codice valido se non è scaduto e non è "CDK NOT FOUND"
+            if result_data.get("msg") in ["SUCCESS", "RECEIVED", "SAME TYPE EXCHANGE"]:
+                return True
+            elif result_data.get("msg") == "TIME ERROR.":
+                return False
+            elif result_data.get("msg") == "CDK NOT FOUND.":
+                return False
+            else:
+                return True  # Altri errori potrebbero essere temporanei
                 
         except Exception as e:
-            logger.error(f"Error updating Supabase progress: {e}")
+            logger.error(f"Error verifying gift code {gift_code}: {e}")
+            return True  # In caso di errore, assumiamo sia valido
     
-    def run(self):
-        """Esegue il worker per il riscatto bulk - VERSIONE CORRETTA"""
-        self.status = "running"
-        self.start_time = datetime.now()
-        active_workers[self.worker_id] = self
+    def extract_gift_code_info(self, message_content):
+        """Estrae codice e data di scadenza dal messaggio"""
+        code_match = re.search(self.code_pattern, message_content)
+        date_match = re.search(self.date_pattern, message_content)
         
-        try:
-            # Aggiorna Supabase all'inizio
-            if supabase_client:
-                try:
-                    supabase_client.table("bulk_redeem_requests").update({
-                        "status": "running",
-                        "started_at": self.start_time.isoformat(),
-                        "worker_id": self.worker_id,
-                        "updated_at": self.start_time.isoformat()
-                    }).eq("id", self.record_id).execute()
-                    logger.info(f"✅ Updated Supabase record {self.record_id} to running")
-                except Exception as e:
-                    logger.error(f"❌ Failed to update Supabase record: {e}")
+        if code_match and date_match:
+            gift_code = code_match.group(1)
+            date_str = date_match.group(1)
+            expiry_date = self.parse_date(date_str)
             
-            # Processa ogni giocatore
-            for i, player_id in enumerate(self.player_list):
-                if self.status == "stopped":
-                    logger.info(f"🛑 Worker {self.worker_id} stopped by user")
-                    break
+            return {
+                'gift_code': gift_code,
+                'expiry_date': expiry_date,
+                'date_str': date_str
+            }
+        return None
+    
+    async def check_channel_for_new_codes(self):
+        """Controlla il canale Discord per nuovi codici regalo"""
+        try:
+            channel = self.client.get_channel(self.channel_id)
+            if not channel:
+                logger.error(f"Channel {self.channel_id} not found")
+                return
+            
+            # Cerca gli ultimi 50 messaggi (puoi aumentare se necessario)
+            messages = []
+            async for message in channel.history(limit=50):
+                messages.append(message)
+            
+            logger.info(f"Found {len(messages)} messages in channel")
+            
+            new_codes = []
+            for message in messages:
+                # Salta messaggi del bot
+                if message.author.bot:
+                    continue
                 
-                logger.info(f"🔄 Processing player {i+1}/{self.total}: {player_id}")
+                content = message.content
+                code_info = self.extract_gift_code_info(content)
                 
-                try:
-                    # Step 1: Ottieni sessione autenticata (COME NEL TUO NEXT.JS)
-                    session = self.get_wos_session(player_id)
-                    if not session:
-                        result = {
-                            'player_id': player_id,
-                            'success': False,
-                            'error': 'Failed to authenticate with WOS API',
-                            'timestamp': datetime.now().isoformat()
-                        }
-                        self.results.append(result)
-                        self.progress = i + 1
-                        self.update_supabase_progress()
+                if code_info:
+                    gift_code = code_info['gift_code']
+                    expiry_date = code_info['expiry_date']
+                    
+                    if not expiry_date:
+                        logger.warning(f"Could not parse date for code {gift_code}")
                         continue
                     
-                    # Step 2: Risolvi il captcha con la sessione autenticata
-                    captcha_code = self.solve_captcha_for_wos(player_id, session)
+                    # Controlla se il codice è scaduto
+                    if self.is_code_expired(expiry_date):
+                        logger.info(f"Code {gift_code} is expired, skipping")
+                        continue
                     
-                    # Step 3: Riscatta il codice regalo con la sessione autenticata
-                    result = self.redeem_gift_code_for_player(player_id, session, captcha_code)
+                    # Verifica se il codice è valido
+                    if not self.verify_gift_code(gift_code):
+                        logger.info(f"Code {gift_code} is invalid, skipping")
+                        continue
                     
-                except Exception as e:
-                    logger.error(f"❌ Error processing player {player_id}: {e}")
-                    result = {
-                        'player_id': player_id,
-                        'success': False,
-                        'error': str(e),
-                        'timestamp': datetime.now().isoformat()
-                    }
-                
-                self.results.append(result)
-                self.progress = i + 1
-                
-                # Aggiorna il progresso nel database
-                self.update_supabase_progress()
-                
-                success_status = "✅" if result.get('success') else "❌"
-                logger.info(f"{success_status} Player {player_id} processed: {result.get('message', result.get('error', 'Unknown'))}")
-                
-                # Pausa tra le richieste
-                time.sleep(2)
+                    # Controlla se il codice è già nel database
+                    existing_code = self.supabase.table("gift_codes")\
+                        .select("*")\
+                        .eq("giftcode", gift_code)\
+                        .execute()
+                    
+                    if not existing_code.data:
+                        # Nuovo codice trovato!
+                        new_codes.append({
+                            'gift_code': gift_code,
+                            'expiry_date': expiry_date.isoformat(),
+                            'date_str': code_info['date_str'],
+                            'message_id': message.id,
+                            'author': str(message.author),
+                            'message_content': content[:100]  # Prime 100 caratteri
+                        })
+                        logger.info(f"New gift code found: {gift_code} (expires: {code_info['date_str']})")
             
-            # Determina lo stato finale
-            if self.status == "stopped":
-                final_status = "stopped"
-                logger.info(f"🛑 Worker {self.worker_id} completed as stopped")
-            else:
-                final_status = "completed"
-                self.status = "completed"
-                successful = len([r for r in self.results if r.get('success', False)])
-                logger.info(f"✅ Worker {self.worker_id} completed: {successful}/{self.total} successful")
+            return new_codes
             
         except Exception as e:
-            logger.error(f"❌ Error in bulk redeem worker {self.worker_id}: {e}")
-            self.status = "failed"
-            final_status = "failed"
-            
-        finally:
-            self.end_time = datetime.now()
-            duration = (self.end_time - self.start_time).total_seconds() if self.start_time else 0
-            
-            # Salva i risultati finali
-            worker_results[self.worker_id] = {
-                'status': self.status,
-                'results': self.results,
-                'summary': {
-                    'total': self.total,
-                    'successful': len([r for r in self.results if r.get('success', False)]),
-                    'failed': len([r for r in self.results if not r.get('success', True)])
-                },
-                'start_time': self.start_time.isoformat() if self.start_time else None,
-                'end_time': self.end_time.isoformat() if self.end_time else None,
-                'duration_seconds': duration
+            logger.error(f"Error checking channel: {e}")
+            return []
+    
+    def save_gift_code_to_db(self, code_info):
+        """Salva il nuovo codice nel database"""
+        try:
+            data = {
+                "giftcode": code_info['gift_code'],
+                "date": datetime.now().isoformat(),
+                "expiry_date": code_info['expiry_date'],
+                "discord_message_id": code_info['message_id'],
+                "discord_author": code_info['author'],
+                "message_preview": code_info['message_content'],
+                "status": "active"
             }
             
-            # Aggiorna Supabase con lo stato finale (se disponibile)
-            if supabase_client:
-                try:
-                    supabase_client.table("bulk_redeem_requests").update({
-                        "status": final_status,
-                        "updated_at": self.end_time.isoformat()
-                    }).eq("id", self.record_id).execute()
-                    logger.info(f"✅ Updated Supabase record {self.record_id} to {final_status}")
-                except Exception as e:
-                    logger.error(f"❌ Failed to update final status in Supabase: {e}")
+            result = self.supabase.table("gift_codes").insert(data).execute()
+            logger.info(f"Saved gift code {code_info['gift_code']} to database")
+            return True
             
-            # Rimuovi dai worker attivi
-            active_workers.pop(self.worker_id, None)
-            logger.info(f"🗑️ Worker {self.worker_id} removed from active workers")
-
-def worker_manager():
-    """Gestisce i worker in background"""
-    while True:
-        try:
-            worker = worker_queue.get()
-            if worker is None:  # Sentinel value per fermare il manager
-                break
-            worker.run()
-            worker_queue.task_done()
         except Exception as e:
-            logger.error(f"Error in worker manager: {e}")
-
-# Avvia il manager dei worker in background
-worker_thread = threading.Thread(target=worker_manager, daemon=True)
-worker_thread.start()
-
-def solve_captcha_internal(base64_image):
-    """Funzione interna per risolvere captcha (usata dai worker)"""
-    try:
-        if model_session is None:
-            return generate_fallback_captcha()
-        
-        processed_image = preprocess_image(base64_image)
-        return predict_captcha(processed_image)
-    except Exception as e:
-        logger.error(f"Error in internal captcha solving: {e}")
-        return generate_fallback_captcha()
-
-# API Routes Esistenti (mantenute)
-
-@app.route('/solve-captcha', methods=['POST', 'OPTIONS'])
-def solve_captcha_endpoint():
-    """Endpoint principale per risolvere i captcha"""
-    if request.method == 'OPTIONS':
-        return '', 200
+            logger.error(f"Error saving gift code to database: {e}")
+            return False
     
-    try:
-        data = request.get_json()
-        
-        if not data or 'image' not in data:
-            return jsonify({
-                'success': False,
-                'error': 'No image provided'
-            }), 400
-        
-        base64_image = data['image']
-        
-        # Verifica se il modello è caricato
-        if model_session is None:
-            logger.warning("Model not loaded, using fallback")
-            captcha_code, confidence = generate_fallback_captcha()
-            return jsonify({
-                'success': True,
-                'captcha_code': captcha_code,
-                'confidence': confidence,
-                'message': 'Fallback captcha (model not available)',
-                'fallback': True
-            })
-        
-        # Preprocessa l'immagine
-        processed_image = preprocess_image(base64_image)
-        
-        # Predici il captcha
-        captcha_code, confidence = predict_captcha(processed_image)
-        
-        # Valida il risultato (come nel tuo bot)
-        valid_chars = set(model_metadata.get('chars', 'abcdefghijklmnopqrstuvwxyz0123456789'))
-        is_valid = (captcha_code and 
-                   len(captcha_code) == 4 and 
-                   all(c in valid_chars for c in captcha_code))
-        
-        if is_valid:
-            logger.info(f"✅ Captcha solved successfully: {captcha_code}")
-            return jsonify({
-                'success': True,
-                'captcha_code': captcha_code,
-                'confidence': confidence,
-                'message': 'Captcha solved successfully',
-                'fallback': False
-            })
-        else:
-            logger.warning(f"❌ Invalid captcha result: {captcha_code}")
-            # Usa fallback se il risultato non è valido
-            captcha_code, confidence = generate_fallback_captcha()
-            return jsonify({
-                'success': True,
-                'captcha_code': captcha_code,
-                'confidence': confidence,
-                'message': f'Fallback captcha (invalid result: {captcha_code})',
-                'fallback': True
-            })
-        
-    except Exception as e:
-        logger.error(f"Error solving captcha: {str(e)}")
-        # Fallback in caso di errore
-        captcha_code, confidence = generate_fallback_captcha()
-        return jsonify({
-            'success': True,
-            'captcha_code': captcha_code,
-            'confidence': confidence,
-            'message': f'Fallback captcha (error: {str(e)})',
-            'fallback': True
-        })
-
-# Nuove API per Bulk Redeem
-
-@app.route('/api/start-bulk-redeem', methods=['POST'])
-def start_bulk_redeem():
-    """Avvia un worker per il riscatto bulk"""
-    try:
-        data = request.get_json()
-        
-        if not data or 'players' not in data or 'gift_code' not in data:
-            return jsonify({'error': 'Missing required fields: players and gift_code'}), 400
-        
-        player_list = data['players']
-        gift_code = data['gift_code']
-        record_id = data.get('record_id', str(uuid.uuid4()))  # Fallback se non fornito
-        
-        # Validazione
-        if not isinstance(player_list, list) or len(player_list) == 0:
-            return jsonify({'error': 'Invalid player list'}), 400
-        
-        if len(player_list) > 100:
-            return jsonify({'error': 'Maximum 100 players allowed'}), 400
-        
-        # Crea nuovo worker
-        worker_id = str(uuid.uuid4())
-        worker = BulkRedeemWorker(record_id, player_list, gift_code, worker_id)
-        
-        # Aggiungi alla coda
-        worker_queue.put(worker)
-        
-        logger.info(f"🚀 Started bulk redeem worker {worker_id} for {len(player_list)} players")
-        
-        return jsonify({
-            'success': True,
-            'worker_id': worker_id,
-            'record_id': record_id,
-            'total_players': len(player_list),
-            'supabase_available': supabase_client is not None,
-            'message': f'Started processing {len(player_list)} players'
-        })
-        
-    except Exception as e:
-        logger.error(f"❌ Error starting bulk redeem: {e}")
-        return jsonify({'error': str(e)}), 500
-
-@app.route('/api/worker-status/<worker_id>', methods=['GET'])
-def get_worker_status(worker_id):
-    """Ottieni lo stato di un worker"""
-    try:
-        worker = active_workers.get(worker_id)
-        result = worker_results.get(worker_id)
-        
-        if not worker and not result:
-            return jsonify({'error': 'Worker not found'}), 404
-        
-        response = {
-            'worker_id': worker_id,
-            'status': result['status'] if result else worker.status,
-            'progress': worker.progress if worker else result['summary']['total'],
-            'total': worker.total if worker else result['summary']['total'],
-            'percentage': round((worker.progress / worker.total * 100) if worker else 100, 1)
-        }
-        
-        if result:
-            response.update({
-                'results': result['results'],
-                'summary': result['summary'],
-                'start_time': result['start_time'],
-                'end_time': result['end_time']
-            })
-        
-        return jsonify(response)
-        
-    except Exception as e:
-        logger.error(f"Error getting worker status: {e}")
-        return jsonify({'error': str(e)}), 500
-
-@app.route('/api/stop-worker/<worker_id>', methods=['POST'])
-def stop_worker(worker_id):
-    """Ferma un worker"""
-    try:
-        worker = active_workers.get(worker_id)
-        if worker:
-            worker.status = "stopped"
-            return jsonify({'success': True, 'message': 'Worker stopped'})
-        else:
-            return jsonify({'error': 'Worker not found or already completed'}), 404
+    def start_bulk_redeem_worker(self, gift_code, player_list):
+        """Avvia un worker per il riscatto bulk"""
+        try:
+            url = f"{self.api_base_url}/api/start-bulk-redeem"
+            payload = {
+                "players": player_list,
+                "gift_code": gift_code,
+                "record_id": str(hash(f"{gift_code}_{datetime.now().timestamp()}"))
+            }
             
-    except Exception as e:
-        logger.error(f"Error stopping worker: {e}")
-        return jsonify({'error': str(e)}), 500
+            response = requests.post(url, json=payload, timeout=30)
+            
+            if response.status_code == 200:
+                result = response.json()
+                logger.info(f"Started bulk redeem worker for code {gift_code}: {result}")
+                return result
+            else:
+                logger.error(f"Failed to start bulk redeem worker: {response.text}")
+                return None
+                
+        except Exception as e:
+            logger.error(f"Error starting bulk redeem worker: {e}")
+            return None
+    
+    def get_active_players_from_supabase(self):
+        """Recupera la lista di player attivi da Supabase"""
+        try:
+            # Query per ottenere tutti i player attivi
+            # Modifica questa query in base alla tua struttura del database
+            result = self.supabase.table("users").select("fid").execute()
+            
+            player_ids = [row['fid'] for row in result.data]
+            logger.info(f"Found {len(player_ids)} active players")
+            return player_ids
+            
+        except Exception as e:
+            logger.error(f"Error getting active players: {e}")
+            return []
+    
+    def check_and_restart_expired_workers(self):
+        """Controlla e riavvia worker per codici ancora validi"""
+        try:
+            # Trova worker completati ieri che hanno codici ancora validi
+            yesterday = (datetime.now() - timedelta(days=1)).isoformat()
+            
+            # Cerca worker completati ieri
+            workers_result = self.supabase.table("bulk_redeem_requests")\
+                .select("*, gift_codes!inner(*)")\
+                .gte("updated_at", yesterday)\
+                .eq("status", "completed")\
+                .execute()
+            
+            for worker in workers_result.data:
+                gift_code = worker['gift_codes']['giftcode']
+                expiry_date_str = worker['gift_codes']['expiry_date']
+                
+                if expiry_date_str:
+                    expiry_date = datetime.fromisoformat(expiry_date_str.replace('Z', '+00:00'))
+                    
+                    # Se il codice è ancora valido e il worker è vecchio di più di 12 ore
+                    if not self.is_code_expired(expiry_date):
+                        worker_updated = datetime.fromisoformat(worker['updated_at'].replace('Z', '+00:00'))
+                        hours_since_update = (datetime.now() - worker_updated).total_seconds() / 3600
+                        
+                        if hours_since_update > 12:  # Riavvia solo se è passato più di 12 ore
+                            logger.info(f"Restarting worker for still-valid code {gift_code}")
+                            
+                            # Ottieni la lista player originale (dovresti memorizzarla nel worker)
+                            player_list = self.get_active_players_from_supabase()
+                            
+                            if player_list:
+                                self.start_bulk_redeem_worker(gift_code, player_list)
+                            
+        except Exception as e:
+            logger.error(f"Error checking expired workers: {e}")
+    
+    async def daily_check(self):
+        """Esegue il check giornaliero"""
+        logger.info("Starting daily gift code check...")
+        
+        # Step 1: Cerca nuovi codici nel canale Discord
+        new_codes = await self.check_channel_for_new_codes()
+        
+        # Step 2: Salva nuovi codici e avvia worker
+        for code_info in new_codes:
+            if self.save_gift_code_to_db(code_info):
+                # Avvia worker per il nuovo codice
+                player_list = self.get_active_players_from_supabase()
+                if player_list:
+                    self.start_bulk_redeem_worker(code_info['gift_code'], player_list)
+        
+        # Step 3: Controlla e riavvia worker per codici ancora validi
+        self.check_and_restart_expired_workers()
+        
+        logger.info("Daily check completed")
+    
+    async def start_monitoring(self):
+        """Avvia il monitoraggio"""
+        @self.client.event
+        async def on_ready():
+            logger.info(f'Bot is ready! Logged in as {self.client.user}')
+            
+            # Esegui il check immediatamente all'avvio
+            await self.daily_check()
+            
+            # Poi esegui ogni 24 ore
+            while True:
+                await asyncio.sleep(24 * 60 * 60)  # 24 ore
+                await self.daily_check()
+        
+        try:
+            await self.client.start(self.discord_token)
+        except Exception as e:
+            logger.error(f"Error starting Discord client: {e}")
 
-@app.route('/api/active-workers', methods=['GET'])
-def get_active_workers():
-    """Lista di tutti i worker attivi/completati"""
-    active = []
-    completed = []
+# Configurazione
+def main():
+    # Leggi le variabili d'ambiente
+    DISCORD_TOKEN = os.getenv("DISCORD_BOT_TOKEN")
+    DISCORD_CHANNEL_ID = int(os.getenv("DISCORD_GIFTCODE_CHANNEL_ID"))
+    SUPABASE_URL = os.getenv("SUPABASE_URL")
+    SUPABASE_KEY = os.getenv("SUPABASE_KEY")
+    API_BASE_URL = os.getenv("API_BASE_URL", "http://localhost:5000")
     
-    for worker_id, worker in active_workers.items():
-        if worker.status in ['running', 'pending']:
-            active.append({
-                'worker_id': worker_id,
-                'status': worker.status,
-                'progress': worker.progress,
-                'total': worker.total,
-                'percentage': round((worker.progress / worker.total * 100), 1)
-            })
+    # Verifica configurazione
+    if not all([DISCORD_TOKEN, DISCORD_CHANNEL_ID, SUPABASE_URL, SUPABASE_KEY]):
+        logger.error("Missing required environment variables")
+        return
     
-    for worker_id, result in worker_results.items():
-        completed.append({
-            'worker_id': worker_id,
-            'status': result['status'],
-            'summary': result['summary'],
-            'start_time': result['start_time'],
-            'end_time': result['end_time']
-        })
+    # Crea e avvia il monitor
+    monitor = DiscordGiftCodeMonitor(
+        discord_token=DISCORD_TOKEN,
+        channel_id=DISCORD_CHANNEL_ID,
+        supabase_url=SUPABASE_URL,
+        supabase_key=SUPABASE_KEY,
+        api_base_url=API_BASE_URL
+    )
     
-    return jsonify({
-        'active': active,
-        'completed': completed
-    })
+    # Avvia il monitoraggio
+    asyncio.run(monitor.start_monitoring())
 
-@app.route('/health', methods=['GET'])
-def health_check():
-    """Endpoint per health check"""
-    model_status = model_session is not None
-    supabase_status = supabase_client is not None
-    
-    health_status = "healthy"
-    if not model_status:
-        health_status = "degraded"
-    if not supabase_status:
-        health_status = "degraded"
-    
-    return jsonify({
-        'status': health_status,
-        'message': 'Captcha solver service is running',
-        'model_loaded': model_status,
-        'model_ready': model_status and model_metadata is not None,
-        'supabase_connected': supabase_status,
-        'active_workers': len(active_workers),
-        'worker_queue_size': worker_queue.qsize(),
-        'timestamp': datetime.now().isoformat()
-    })
-
-@app.route('/')
-def home():
-    return jsonify({
-        'message': 'Captcha Solver API',
-        'status': 'online',
-        'model_loaded': model_session is not None,
-        'model_ready': model_session is not None and model_metadata is not None,
-        'bulk_redeem_supported': True,
-        'supabase_available': supabase_client is not None
-    })
-
-if __name__ == '__main__':
-    port = int(os.environ.get('PORT', 5000))
-    app.run(host='0.0.0.0', port=port, debug=False)
+if __name__ == "__main__":
+    main()
