@@ -6,110 +6,69 @@ from supabase import create_client
 import os
 import asyncio
 import time
-import re
 import uuid
 
-# Configura logging
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+# Configura logging (usa lo stesso del primo servizio)
 logger = logging.getLogger(__name__)
 
-class WikiGiftCodeScraper:
+class PlRedeemScraper:
     def __init__(self, supabase_url, supabase_key):
         self.supabase_url = supabase_url
         self.supabase_key = supabase_key
         self.supabase = create_client(supabase_url, supabase_key)
-        self.wiki_url = "https://www.whiteoutsurvival.wiki/giftcodes/"
+        self.redeem_url = "https://whiteoutsurvival.pl/redeem/"
         
-    def fetch_wiki_page(self):
-        """Scarica la pagina wiki dei codici"""
+    def fetch_redeem_page(self):
+        """Scarica la pagina di redeem"""
         try:
             headers = {
                 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
             }
             
-            logger.info(f"🌐 Fetching wiki page: {self.wiki_url}")
-            response = requests.get(self.wiki_url, headers=headers, timeout=30)
+            logger.info(f"🌐 Fetching redeem page: {self.redeem_url}")
+            response = requests.get(self.redeem_url, headers=headers, timeout=30)
             response.raise_for_status()
             
-            logger.info("✅ Successfully fetched wiki page")
+            logger.info("✅ Successfully fetched redeem page")
             return response.text
             
         except Exception as e:
-            logger.error(f"❌ Error fetching wiki page: {e}")
+            logger.error(f"❌ Error fetching redeem page: {e}")
             return None
     
     def parse_codes_from_html(self, html_content):
-        """Estrae codici attivi e scaduti dall'HTML"""
+        """Estrae codici attivi e scaduti dall'HTML del sito PL"""
         try:
             soup = BeautifulSoup(html_content, 'html.parser')
             
             active_codes = []
             expired_codes = []
             
-            # Trova tutti i tag strong per identificare le sezioni
-            strong_tags = soup.find_all('strong')
+            # Trova il div principale che contiene i codici
+            admin_codes_div = soup.find('div', id='admin-codes')
+            if not admin_codes_div:
+                logger.error("❌ Could not find admin-codes div")
+                return [], []
             
-            for i, tag in enumerate(strong_tags):
-                text = tag.get_text().strip()
-                
-                if "Active Codes:" in text:
-                    logger.info("📋 Found Active Codes section")
-                    # Cerca i codici attivi dopo questo tag
-                    current = tag.parent.find_next_sibling()
-                    while current and not current.find('strong', string=re.compile('Expired Codes:')):
-                        if current.name == 'ul':
-                            # Estrai codici dagli span dentro gli ul
-                            code_spans = current.find_all('span', class_='code')
-                            for span in code_spans:
-                                code = span.get_text().strip()
-                                if code and code not in active_codes:
-                                    active_codes.append(code)
-                                    logger.info(f"✅ Found active code: {code}")
-                        current = current.find_next_sibling()
-                
-                elif "Expired Codes:" in text:
-                    logger.info("📋 Found Expired Codes section")
-                    # Cerca i codici scaduti dopo questo tag
-                    current = tag.parent.find_next_sibling()
-                    while current:
-                        # Cerca codici negli span
-                        code_spans = current.find_all('span', class_='code')
-                        for span in code_spans:
-                            code = span.get_text().strip()
-                            if code and code not in expired_codes:
-                                expired_codes.append(code)
-                                logger.info(f"❌ Found expired code: {code}")
-                        
-                        # Cerca anche testo diretto nei div (per i codici senza span)
-                        if current.name == 'div':
-                            text_content = current.get_text().strip()
-                            if text_content:
-                                # Estrai potenziali codici (parole in maiuscolo/misto)
-                                lines = text_content.split('\n')
-                                for line in lines:
-                                    line = line.strip()
-                                    if line and not any(keyword in line.lower() for keyword in ['codes:', 'active', 'expired']):
-                                        # Considera come codice se è abbastanza lungo e non contiene spazi
-                                        if len(line) >= 5 and ' ' not in line and line not in expired_codes:
-                                            expired_codes.append(line)
-                                            logger.info(f"❌ Found expired code from text: {line}")
-                        
-                        # Fermati quando trovi il prossimo strong tag o fine sezione
-                        next_strong = current.find_next('strong')
-                        if next_strong:
-                            break
-                        current = current.find_next_sibling()
-            
-            # Verifica che i codici con pulsanti copy siano attivi
-            all_code_spans = soup.find_all('span', class_='code')
-            for span in all_code_spans:
-                code = span.get_text().strip()
-                if code and code not in active_codes and code not in expired_codes:
-                    # Se ha un pulsante copy nelle vicinanze, probabilmente è attivo
-                    copy_btn = span.find_next('button', class_='copy-btn')
-                    if copy_btn:
+            # Estrai codici attivi (button con classe admin-code-btn)
+            active_codes_section = admin_codes_div.find('div', class_='admin-code-list active-codes')
+            if active_codes_section:
+                active_buttons = active_codes_section.find_all('button', class_='admin-code-btn')
+                for button in active_buttons:
+                    code = button.get('data-code', '').strip()
+                    if code and code not in active_codes:
                         active_codes.append(code)
-                        logger.info(f"✅ Found active code with copy button: {code}")
+                        logger.info(f"✅ Found active code: {code}")
+            
+            # Estrai codici scaduti (span con classe admin-code-btn expired)
+            expired_codes_section = admin_codes_div.find('div', class_='admin-code-list expired-codes')
+            if expired_codes_section:
+                expired_spans = expired_codes_section.find_all('span', class_='admin-code-btn expired')
+                for span in expired_spans:
+                    code = span.get('data-code', '').strip()
+                    if code and code not in expired_codes:
+                        expired_codes.append(code)
+                        logger.info(f"❌ Found expired code: {code}")
             
             logger.info(f"📊 Parsing completed: {len(active_codes)} active, {len(expired_codes)} expired codes")
             return active_codes, expired_codes
@@ -134,8 +93,8 @@ class WikiGiftCodeScraper:
             return {}
     
     def calculate_expiry_date(self, gift_code):
-        """Calcola una data di scadenza ragionevole per i nuovi codici"""
-        # Per i codici dal wiki, assumiamo una scadenza di 30 giorni
+        """Calcola una data di scadenza ragionevole per i nuovi codici attivi"""
+        # Per i codici attivi dal sito PL, assumiamo una scadenza di 30 giorni
         return (datetime.now() + timedelta(days=30)).replace(hour=23, minute=59, second=0)
     
     def get_expired_date_2024(self):
@@ -292,21 +251,22 @@ class WikiGiftCodeScraper:
                                 "giftcode": code,
                                 "date": current_time,
                                 "expiry_date": expiry_date.isoformat(),
-                                "discord_author": "wiki_scraper",
-                                "message_preview": "Added from wiki",
+                                "discord_author": "pl_redeem_scraper",
+                                "message_preview": "Added from PL redeem site",
                                 "status": "active"
                             })\
                             .execute()
                         new_codes_added += 1
                         new_active_codes.append(code)  # Aggiungi alla lista dei nuovi
-                        logger.info(f"✅ Added new code from wiki: {code}")
+                        logger.info(f"✅ Added new code from PL site: {code}")
                     except Exception as e:
                         logger.error(f"❌ Error adding code {code}: {e}")
             
-            # Segna come scaduti i codici nella lista expired
+            # Gestisci codici scaduti
             for code in expired_codes:
                 if code in existing_codes:
                     existing_code = existing_codes[code]
+                    # Se il codice esiste ma non è marcato come scaduto, aggiornalo
                     if existing_code.get('status') != 'expired':
                         try:
                             expired_date = self.get_expired_date_2024()
@@ -319,9 +279,27 @@ class WikiGiftCodeScraper:
                                 .eq("giftcode", code)\
                                 .execute()
                             codes_expired += 1
-                            logger.info(f"🗑️ Marked code as expired: {code}")
+                            logger.info(f"🗑️ Marked code as expired with 2024 date: {code}")
                         except Exception as e:
                             logger.error(f"❌ Error expiring code {code}: {e}")
+                else:
+                    # Se il codice scaduto non esiste nel database, aggiungilo come scaduto
+                    try:
+                        expired_date = self.get_expired_date_2024()
+                        self.supabase.table("gift_codes")\
+                            .insert({
+                                "giftcode": code,
+                                "date": current_time,
+                                "expiry_date": expired_date.isoformat(),
+                                "discord_author": "pl_redeem_scraper",
+                                "message_preview": "Added as expired from PL site",
+                                "status": "expired"
+                            })\
+                            .execute()
+                        new_codes_added += 1
+                        logger.info(f"📝 Added expired code from PL site: {code}")
+                    except Exception as e:
+                        logger.error(f"❌ Error adding expired code {code}: {e}")
             
             logger.info(f"🎯 Database update: {new_codes_added} new, {codes_updated} updated, {codes_expired} expired")
             
@@ -338,20 +316,20 @@ class WikiGiftCodeScraper:
     
     def run_scraping(self):
         """Esegue tutto il processo di scraping"""
-        logger.info("🚀 Starting wiki gift code scraping...")
+        logger.info("🚀 Starting PL redeem code scraping...")
         
-        html_content = self.fetch_wiki_page()
+        html_content = self.fetch_redeem_page()
         if not html_content:
-            logger.error("❌ Failed to fetch wiki page")
+            logger.error("❌ Failed to fetch redeem page")
             return False
         
         active_codes, expired_codes = self.parse_codes_from_html(html_content)
         
         if not active_codes and not expired_codes:
-            logger.warning("⚠️ No codes found on wiki page")
+            logger.warning("⚠️ No codes found on redeem page")
             return False
         
         new, updated, expired = self.update_database(active_codes, expired_codes)
         
-        logger.info(f"✅ Wiki scraping completed: {len(active_codes)} active, {len(expired_codes)} expired codes processed")
+        logger.info(f"✅ PL redeem scraping completed: {len(active_codes)} active, {len(expired_codes)} expired codes processed")
         return True

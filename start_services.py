@@ -54,23 +54,47 @@ def run_discord_bot():
     except Exception as e:
         logger.error(f"Error starting Discord bot: {e}")
 
-async def run_wiki_scraper():
-    """Avvia lo scraper wiki"""
+def run_scraper_periodically(scraper_type, interval_hours=6):
+    """Esegue uno scraper periodicamente ogni X ore"""
     try:
-        logger.info("🌐 Starting Wiki Scraper...")
-        from wiki_scraper import run_wiki_scraper_periodically
-        await run_wiki_scraper_periodically()
+        logger.info(f"🔄 Starting {scraper_type} scraper (every {interval_hours} hours)...")
+        
+        supabase_url = os.getenv("SUPABASE_URL")
+        supabase_key = os.getenv("SUPABASE_KEY")
+        
+        if not supabase_url or not supabase_key:
+            logger.error("❌ Missing Supabase credentials")
+            return
+        
+        # Importa lo scraper appropriato
+        if scraper_type == "wiki":
+            from wiki_scraper import WikiGiftCodeScraper
+            scraper = WikiGiftCodeScraper(supabase_url, supabase_key)
+        elif scraper_type == "pl":
+            from pl_scraper import PlRedeemScraper
+            scraper = PlRedeemScraper(supabase_url, supabase_key)
+        else:
+            logger.error(f"❌ Unknown scraper type: {scraper_type}")
+            return
+        
+        # Loop infinito con intervallo fisso
+        while True:
+            try:
+                logger.info(f"🚀 Starting {scraper_type} scraping cycle...")
+                success = scraper.run_scraping()
+                if success:
+                    logger.info(f"✅ {scraper_type.upper()} scraping completed successfully")
+                else:
+                    logger.error(f"❌ {scraper_type.upper()} scraping failed")
+            except Exception as e:
+                logger.error(f"❌ Error in {scraper_type} scraping cycle: {e}")
+            
+            # Aspetta 6 ore prima della prossima esecuzione
+            logger.info(f"⏰ {scraper_type.upper()} waiting {interval_hours} hours for next scraping...")
+            time.sleep(interval_hours * 60 * 60)
+            
     except Exception as e:
-        logger.error(f"Error starting wiki scraper: {e}")
-
-def start_wiki_scraper_thread():
-    """Avvia lo scraper wiki in un thread asyncio"""
-    loop = asyncio.new_event_loop()
-    asyncio.set_event_loop(loop)
-    try:
-        loop.run_until_complete(run_wiki_scraper())
-    finally:
-        loop.close()
+        logger.error(f"❌ Error starting {scraper_type} scraper: {e}")
 
 if __name__ == "__main__":
     logger.info("🎯 Starting all services...")
@@ -96,11 +120,17 @@ if __name__ == "__main__":
         discord_thread.start()
         logger.info("✅ Discord bot started in background...")
         
-        # Avvia Wiki scraper in un thread
-        wiki_thread = Thread(target=start_wiki_scraper_thread)
+        # Avvia Wiki scraper ogni 6 ore
+        wiki_thread = Thread(target=run_scraper_periodically, args=("wiki", 6))
         wiki_thread.daemon = True
         wiki_thread.start()
-        logger.info("✅ Wiki scraper started in background...")
+        logger.info("✅ Wiki scraper started (every 6 hours)...")
+        
+        # Avvia PL scraper ogni 6 ore
+        pl_thread = Thread(target=run_scraper_periodically, args=("pl", 6))
+        pl_thread.daemon = True
+        pl_thread.start()
+        logger.info("✅ PL scraper started (every 6 hours)...")
         
         # Mantieni il processo principale attivo
         try:

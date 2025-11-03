@@ -447,12 +447,12 @@ class DiscordGiftCodeMonitor:
                     # Converti la stringa in datetime (rimuovi timezone info se presente)
                     expiry_date = datetime.fromisoformat(expiry_date_str.replace('Z', '+00:00')).replace(tzinfo=None)
                     
-                    # Se il codice è ancora valido e il worker è vecchio di più di 12 ore
+                    # Se il codice è ancora valido e il worker è vecchio di più di 6 ore
                     if not self.is_code_expired(expiry_date):
                         worker_updated = datetime.fromisoformat(worker['updated_at'].replace('Z', '+00:00')).replace(tzinfo=None)
                         hours_since_update = (datetime.now().replace(tzinfo=None) - worker_updated).total_seconds() / 3600
                         
-                        if hours_since_update > 12:
+                        if hours_since_update > 6:
                             logger.info(f"Restarting worker for still-valid code {gift_code}")
                             
                             # Cerca se esiste già un worker attivo per questo codice
@@ -477,8 +477,8 @@ class DiscordGiftCodeMonitor:
             logger.error(f"Error checking expired workers: {e}")
     
     async def daily_check(self):
-        """Esegue il check giornaliero"""
-        logger.info("Starting daily gift code check...")
+        """Esegue il check ogni 6 ore"""
+        logger.info("🔄 Starting 6-hour gift code check...")
         
         # Step 0: Pulisci i worker vecchi
         self.cleanup_old_workers()
@@ -526,7 +526,7 @@ class DiscordGiftCodeMonitor:
         logger.info("🔄 Checking and restarting expired workers...")
         self.check_and_restart_expired_workers()
         
-        logger.info("✅ Daily check completed")
+        logger.info("✅ 6-hour check completed")
     
     async def start_monitoring(self):
         """Avvia il monitoraggio"""
@@ -537,9 +537,9 @@ class DiscordGiftCodeMonitor:
             # Esegui il check immediatamente all'avvio
             await self.daily_check()
             
-            # Poi esegui ogni 24 ore
+            # Poi esegui ogni 6 ore
             while True:
-                await asyncio.sleep(24 * 60 * 60)  # 24 ore
+                await asyncio.sleep(6 * 60 * 60)  # 6 ore
                 await self.daily_check()
         
         try:
