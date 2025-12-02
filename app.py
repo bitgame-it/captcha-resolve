@@ -725,7 +725,7 @@ def start_bulk_redeem():
         if not isinstance(player_list, list) or len(player_list) == 0:
             return jsonify({'error': 'Invalid player list'}), 400
         
-        if len(player_list) < 100:
+        if len(player_list) < 1:
             return jsonify({'error': 'Minimum 1 players allowed'}), 400
         
         # Crea il record nel database prima di avviare il worker
