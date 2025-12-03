@@ -36,7 +36,7 @@ def run_flask():
     try:
         logger.info("🚀 Starting Flask API...")
         # Usa la porta di Railway
-        port = os.environ.get('PORT', '10000')
+        port = os.environ.get('PORT', '5000')
         os.system(f"gunicorn app:app -b 0.0.0.0:{port} --access-logfile - --error-logfile -")
     except Exception as e:
         logger.error(f"Error starting Flask: {e}")
@@ -47,7 +47,7 @@ def run_discord_bot():
         logger.info("🤖 Starting Discord Bot...")
         
         # Imposta l'URL dell'API basato sulla porta di Railway
-        port = os.environ.get('PORT', '10000')
+        port = os.environ.get('PORT', '5000')
         os.environ['API_BASE_URL'] = f"http://localhost:{port}"
         
         os.system("python discord_bot.py")
@@ -100,7 +100,7 @@ if __name__ == "__main__":
     logger.info("🎯 Starting all services...")
     
     # Ottieni la porta di Railway
-    railway_port = os.environ.get('PORT', '10000')
+    railway_port = os.environ.get('PORT', '5000')
     logger.info(f"🔧 Railway PORT: {railway_port}")
     
     # Avvia Flask in un thread

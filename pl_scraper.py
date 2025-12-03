@@ -154,7 +154,7 @@ class PlRedeemScraper:
         try:
             import requests
             
-            api_base_url = os.getenv("API_BASE_URL", "http://localhost:10000")
+            api_base_url = os.getenv("API_BASE_URL", "http://localhost:5000")
             url = f"{api_base_url}/api/start-bulk-redeem"
             record_id = str(uuid.uuid4())
             
